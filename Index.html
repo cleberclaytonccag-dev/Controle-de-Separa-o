@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<base target="_top">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Controle de Separação</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg:#f4f6fb; --card:#fff; --txt:#1d2433; --mut:#6b7488; --line:#e3e7f0;
+    --pri:#3949ab; --pri-t:#fff; --ok:#2e9e6b; --med:#f0a500; --dif:#d64545;
+    --warn-bg:#fff4d6; --warn-t:#7a5800; --err-bg:#fde8e8; --err-t:#8c1d1d; --ok-bg:#e3f6ec; --ok-t:#14603f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:#12151d; --card:#1b2030; --txt:#e8ebf4; --mut:#9aa3b8; --line:#2c3347;
+      --pri:#7986cb; --pri-t:#10131c;
+      --warn-bg:#3a3017; --warn-t:#ffd978; --err-bg:#3d1f21; --err-t:#ffb4b4; --ok-bg:#16352a; --ok-t:#9be3c0;
+    }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:15px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  header { background:var(--pri); color:var(--pri-t); padding:12px 16px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  header h1 { margin:0; font-size:18px; }
+  .tag { background:rgba(255,255,255,.25); border-radius:10px; padding:2px 8px; font-size:12px; }
+  nav { display:flex; background:var(--card); border-bottom:1px solid var(--line); position:sticky; top:0; z-index:5; }
+  nav button { flex:1; border:0; background:none; color:var(--mut); padding:13px 6px; font:inherit; font-weight:600; border-bottom:3px solid transparent; cursor:pointer; }
+  nav button.on { color:var(--pri); border-color:var(--pri); }
+  .badge { background:var(--dif); color:#fff; border-radius:10px; padding:1px 7px; font-size:12px; margin-left:4px; }
+  main { max-width:1100px; margin:0 auto; padding:16px; }
+  section { display:none; } section.on { display:block; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-bottom:16px; }
+  .card h2 { margin:0 0 12px; font-size:16px; }
+  label { display:block; font-size:13px; color:var(--mut); margin-bottom:4px; font-weight:600; }
+  input, select { width:100%; padding:11px 10px; font:inherit; color:var(--txt); background:var(--bg); border:1px solid var(--line); border-radius:8px; }
+  .grid { display:grid; gap:12px; grid-template-columns:1fr 1fr; }
+  .grid .full { grid-column:1 / -1; }
+  @media (min-width:700px) { .grid.g3 { grid-template-columns:repeat(3,1fr); } .grid.g5 { grid-template-columns:repeat(5,1fr); } }
+  .btn { background:var(--pri); color:var(--pri-t); border:0; border-radius:8px; padding:12px 18px; font:inherit; font-weight:700; cursor:pointer; }
+  .btn:disabled { opacity:.55; cursor:wait; }
+  .btn.sec { background:var(--bg); color:var(--txt); border:1px solid var(--line); font-weight:600; }
+  .msg { padding:12px; border-radius:8px; margin-top:12px; font-size:14px; }
+  .msg.ok { background:var(--ok-bg); color:var(--ok-t); } .msg.err { background:var(--err-bg); color:var(--err-t); } .msg.warn { background:var(--warn-bg); color:var(--warn-t); }
+  .hint { color:var(--mut); font-size:13px; margin-top:6px; }
+  .kpis { display:grid; gap:12px; grid-template-columns:1fr 1fr; margin-bottom:16px; }
+  @media (min-width:700px) { .kpis { grid-template-columns:repeat(4,1fr); } }
+  .kpi { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .kpi b { display:block; font-size:24px; } .kpi span { color:var(--mut); font-size:13px; }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:8px; overflow:hidden; }
+  .seg button { border:0; background:var(--card); color:var(--txt); padding:10px 16px; font:inherit; font-weight:600; cursor:pointer; }
+  .seg button.on { background:var(--pri); color:var(--pri-t); }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin-bottom:16px; }
+  .bar .f { min-width:150px; }
+  .wrap { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:14px; white-space:nowrap; }
+  th, td { padding:8px 10px; text-align:right; border-bottom:1px solid var(--line); }
+  th:nth-child(2), td:nth-child(2) { text-align:left; } th { color:var(--mut); font-size:12px; text-transform:uppercase; }
+  tbody tr:first-child td:first-child { font-weight:700; color:var(--pri); }
+  .charts { display:grid; gap:16px; }
+  @media (min-width:900px) { .charts.two { grid-template-columns:1fr 1fr; } }
+  .chartbox { position:relative; height:300px; }
+  .prod { display:flex; flex-direction:column; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
+  @media (min-width:700px) { .prod { flex-direction:row; align-items:center; justify-content:space-between; } }
+  .prod .sku { font-weight:700; } .prod .desc { color:var(--mut); font-size:13px; }
+  .dif { display:flex; gap:6px; } .dif button { flex:1; min-width:84px; padding:10px 8px; border-radius:8px; border:2px solid var(--line); background:var(--bg); color:var(--txt); font:inherit; font-weight:600; cursor:pointer; }
+  .dif button.d1.on { background:var(--ok); border-color:var(--ok); color:#fff; } .dif button.d2.on { background:var(--med); border-color:var(--med); color:#1d2433; } .dif button.d3.on { background:var(--dif); border-color:var(--dif); color:#fff; }
+  .chips button { margin-right:6px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .empty { color:var(--mut); text-align:center; padding:24px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📦 Controle de Separação</h1>
+  <span id="modoTeste" class="tag" hidden>MODO TESTE</span>
+</header>
+<nav>
+  <button data-tab="lancar" class="on">Lançar</button>
+  <button data-tab="painel">Painel</button>
+  <button data-tab="produtos">Produtos <span id="badgePend" class="badge" hidden>0</span></button>
+</nav>
+
+<main>
+  <!-- LANÇAR -->
+  <section id="tab-lancar" class="on">
+    <div class="card">
+      <h2>Novo lançamento</h2>
+      <form id="form" autocomplete="off">
+        <div class="grid">
+          <div><label for="data">Data</label><input type="date" id="data" required></div>
+          <div><label for="lote">Número do lote</label><input type="text" id="lote" inputmode="numeric" required></div>
+          <div class="full"><label for="sep">Separador</label><select id="sep" required></select></div>
+          <div><label for="ini">Início</label><input type="time" id="ini" required></div>
+          <div><label for="fim">Término</label><input type="time" id="fim" required></div>
+        </div>
+        <div class="hint" id="dur">Duração: —</div>
+        <div style="margin-top:14px"><button class="btn" id="btnSalvar" type="submit">Salvar lançamento</button></div>
+      </form>
+      <div id="msgLancar"></div>
+    </div>
+    <div class="card">
+      <h2>Últimos lançamentos</h2>
+      <div class="wrap"><table id="tbUltimos"></table></div>
+    </div>
+  </section>
+
+  <!-- PAINEL -->
+  <section id="tab-painel">
+    <div class="bar">
+      <div class="seg" id="segPeriodo">
+        <button data-p="dia">Dia</button><button data-p="semana" class="on">Semana</button><button data-p="mes">Mês</button>
+      </div>
+      <button class="btn sec" id="prev" title="Período anterior">‹</button>
+      <div class="f"><label for="ref">Data de referência</label><input type="date" id="ref"></div>
+      <button class="btn sec" id="next" title="Próximo período">›</button>
+    </div>
+    <div class="hint" id="periodoTxt" style="margin:-8px 0 12px"></div>
+    <div id="avisoPend"></div>
+    <div id="msgPainel"></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="card"><h2>Ranking por colaborador <span class="hint">(ordenado por pontos/hora)</span></h2>
+      <div class="wrap"><table id="tbRank"></table></div></div>
+    <div class="charts two">
+      <div class="card"><h2>Itens por dificuldade</h2><div class="chartbox"><canvas id="chDif"></canvas></div></div>
+      <div class="card"><h2>Produtividade (por hora)</h2><div class="chartbox"><canvas id="chProd"></canvas></div></div>
+    </div>
+    <div class="card" id="boxEvol"><h2>Evolução diária de pontos</h2><div class="chartbox"><canvas id="chEvol"></canvas></div></div>
+  </section>
+
+  <!-- PRODUTOS -->
+  <section id="tab-produtos">
+    <div class="card">
+      <h2>Classificar produtos</h2>
+      <div class="hint" style="margin:-6px 0 12px">1 = Simples · 2 = Médio · 3 = Difícil. Vale para todos os lançamentos, inclusive os já feitos.</div>
+      <div class="chips" style="margin-bottom:10px">
+        <button class="btn sec on" data-f="pendentes">Pendentes</button><button class="btn sec" data-f="todos">Ver todos</button>
+      </div>
+      <input type="search" id="busca" placeholder="Buscar por SKU ou descrição…">
+      <div id="msgProd"></div>
+      <div id="listaProd"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const run = (fn, ...args) => new Promise((ok, fail) => google.script.run.withSuccessHandler(ok).withFailureHandler(fail)[fn](...args));
+const erroTxt = (e) => String((e && e.message) || e || 'Erro desconhecido.').replace(/^(Error|Exception):\s*/i, '');
+const nf = (n, d = 1) => Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: d, maximumFractionDigits: d });
+const hhmm = (h) => { const m = Math.round(h * 60); return Math.floor(m / 60) + 'h' + String(m % 60).padStart(2, '0'); };
+const brData = (s) => s ? s.split('-').reverse().join('/') : '';
+const msg = (el, tipo, html) => { $(el).innerHTML = html ? `<div class="msg ${tipo}">${html}</div>` : ''; };
+
+// ---------- navegação ----------
+document.querySelectorAll('nav button').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('nav button').forEach((x) => x.classList.toggle('on', x === b));
+  document.querySelectorAll('section').forEach((s) => s.classList.toggle('on', s.id === 'tab-' + b.dataset.tab));
+  if (b.dataset.tab === 'painel') carregarPainel();
+  if (b.dataset.tab === 'produtos') carregarProdutos();
+}));
+
+function setPendentes(n) {
+  $('badgePend').textContent = n; $('badgePend').hidden = !n;
+}
+
+// ---------- lançar ----------
+function atualizarDuracao() {
+  const a = $('ini').value, b = $('fim').value;
+  if (!a || !b) { $('dur').textContent = 'Duração: —'; return; }
+  const m = (t) => +t.slice(0, 2) * 60 + +t.slice(3, 5);
+  let d = m(b) - m(a); if (d < 0) d += 1440;
+  $('dur').textContent = d === 0 ? 'Término igual ao início — confira.' : `Duração: ${d} min (${hhmm(d / 60)})${m(b) < m(a) ? ' — passou da meia-noite' : ''}`;
+}
+$('ini').addEventListener('input', atualizarDuracao); $('fim').addEventListener('input', atualizarDuracao);
+
+function tabelaUltimos(l) {
+  $('tbUltimos').innerHTML = l.length
+    ? '<thead><tr><th>Data</th><th>Lote</th><th>Separador</th><th>Início</th><th>Término</th><th>Min</th><th>Itens</th></tr></thead><tbody>' +
+      l.map((r) => `<tr><td>${brData(r.data)}</td><td>${esc(r.lote)}</td><td style="text-align:left">${esc(r.separador)}</td><td>${esc(r.inicio)}</td><td>${esc(r.termino)}</td><td>${r.duracao}</td><td>${nf(r.itens, 0)}</td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="empty" style="text-align:center">Nenhum lançamento ainda.</td></tr></tbody>';
+}
+
+$('form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const btn = $('btnSalvar'); btn.disabled = true; btn.textContent = 'Consultando o Amber e salvando…'; msg('msgLancar', '', '');
+  try {
+    const r = await run('salvarLancamento', { data: $('data').value, lote: $('lote').value, separador: $('sep').value, inicio: $('ini').value, termino: $('fim').value });
+    let h = `✅ Lote <b>${esc(r.lote)}</b> salvo para <b>${esc(r.separador)}</b>: ${nf(r.totalItens, 0)} itens em ${r.skus} SKUs, duração ${r.duracao} min.`;
+    if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) cadastrado(s) — falta classificar a dificuldade na aba Produtos.`;
+    msg('msgLancar', 'ok', h);
+    tabelaUltimos(r.ultimos); setPendentes(r.pendentes);
+    $('ini').value = $('fim').value; $('fim').value = ''; $('lote').value = ''; atualizarDuracao(); $('lote').focus();
+  } catch (e) {
+    msg('msgLancar', 'err', '❌ ' + esc(erroTxt(e)));
+  } finally {
+    btn.disabled = false; btn.textContent = 'Salvar lançamento';
+  }
+});
+
+// ---------- painel ----------
+let periodo = 'semana', charts = {};
+const CORES = ['#3949ab', '#e91e63', '#00897b', '#f57c00', '#8e24aa', '#43a047', '#1e88e5', '#6d4c41', '#c0ca33', '#546e7a'];
+
+document.querySelectorAll('#segPeriodo button').forEach((b) => b.addEventListener('click', () => {
+  periodo = b.dataset.p;
+  document.querySelectorAll('#segPeriodo button').forEach((x) => x.classList.toggle('on', x === b));
+  carregarPainel();
+}));
+$('ref').addEventListener('change', carregarPainel);
+function mover(sinal) {
+  const [y, m, d] = $('ref').value.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (periodo === 'dia') dt.setUTCDate(dt.getUTCDate() + sinal);
+  else if (periodo === 'semana') dt.setUTCDate(dt.getUTCDate() + 7 * sinal);
+  else dt.setUTCMonth(dt.getUTCMonth() + sinal, 1);
+  $('ref').value = dt.toISOString().slice(0, 10); carregarPainel();
+}
+$('prev').addEventListener('click', () => mover(-1)); $('next').addEventListener('click', () => mover(1));
+
+function grafico(id, cfg) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart($(id), cfg);
+}
+
+async function carregarPainel() {
+  if (!$('ref').value) return;
+  msg('msgPainel', 'warn', 'Carregando…');
+  try {
+    const p = await run('getPainel', periodo, $('ref').value);
+    msg('msgPainel', '', '');
+    $('periodoTxt').textContent = p.ini === p.fim ? brData(p.ini) : `${brData(p.ini)} a ${brData(p.fim)}`;
+    const e = p.equipe;
+    $('kpis').innerHTML = [['Lotes', nf(e.lotes, 0)], ['Itens separados', nf(e.itens, 0)], ['Pontos', nf(e.pontos, 0)], ['Pontos/hora da equipe', nf(e.pontosHora, 1)]]
+      .map(([t, v]) => `<div class="kpi"><b>${v}</b><span>${t}</span></div>`).join('');
+
+    $('avisoPend').innerHTML = p.pendentesTotal
+      ? `<div class="msg warn" style="margin:0 0 16px">⚠️ ${p.pendentesTotal} produto(s) deste período ainda sem dificuldade (contados como peso 1): ` +
+        p.pendentes.slice(0, 5).map((x) => esc(x.sku)).join(', ') + (p.pendentesTotal > 5 ? '…' : '') +
+        ` — <a href="#" id="irProd">classificar agora</a></div>` : '';
+    if ($('irProd')) $('irProd').onclick = (ev) => { ev.preventDefault(); document.querySelector('nav [data-tab=produtos]').click(); };
+
+    const r = p.ranking;
+    $('tbRank').innerHTML = r.length
+      ? '<thead><tr><th>#</th><th>Colaborador</th><th>Lotes</th><th>Horas</th><th>Itens</th><th>Simples</th><th>Médios</th><th>Difíceis</th><th>Dif. média</th><th>Pontos</th><th>Itens/h</th><th>Pontos/h</th></tr></thead><tbody>' +
+        r.map((c, i) => `<tr><td>${i + 1}</td><td>${esc(c.nome)}</td><td>${c.lotes}</td><td>${hhmm(c.horas)}</td><td>${nf(c.itens, 0)}</td><td>${nf(c.simples, 0)}</td><td>${nf(c.medios, 0)}</td><td>${nf(c.dificeis, 0)}</td><td>${nf(c.difMedia, 2)}</td><td>${nf(c.pontos, 0)}</td><td>${nf(c.itensHora, 1)}</td><td><b>${nf(c.pontosHora, 1)}</b></td></tr>`).join('') + '</tbody>'
+      : '<tbody><tr><td class="empty" style="text-align:center">Sem lançamentos no período.</td></tr></tbody>';
+
+    const nomes = r.map((c) => c.nome);
+    grafico('chDif', { type: 'bar', data: { labels: nomes, datasets: [
+      { label: 'Simples', data: r.map((c) => c.simples), backgroundColor: '#2e9e6b' },
+      { label: 'Médio', data: r.map((c) => c.medios), backgroundColor: '#f0a500' },
+      { label: 'Difícil', data: r.map((c) => c.dificeis), backgroundColor: '#d64545' }] },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { stacked: true }, y: { stacked: true, beginAtZero: true } } } });
+    grafico('chProd', { type: 'bar', data: { labels: nomes, datasets: [
+      { label: 'Pontos/h', data: r.map((c) => c.pontosHora), backgroundColor: '#3949ab' },
+      { label: 'Itens/h', data: r.map((c) => c.itensHora), backgroundColor: '#90a4ae' }] },
+      options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+
+    const multi = periodo !== 'dia';
+    $('boxEvol').style.display = multi ? '' : 'none';
+    if (multi) {
+      grafico('chEvol', { type: 'line', data: { labels: p.dias.map((d) => d.slice(8) + '/' + d.slice(5, 7)), datasets: r.map((c, i) => (
+        { label: c.nome, data: c.serie, borderColor: CORES[i % CORES.length], backgroundColor: CORES[i % CORES.length], tension: .25 })) },
+        options: { responsive: true, maintainAspectRatio: false, scales: { y: { beginAtZero: true } } } });
+    }
+  } catch (e) {
+    msg('msgPainel', 'err', '❌ ' + esc(erroTxt(e)));
+  }
+}
+
+// ---------- produtos ----------
+let produtos = [], filtro = 'pendentes';
+document.querySelectorAll('.chips button').forEach((b) => b.addEventListener('click', () => {
+  filtro = b.dataset.f;
+  document.querySelectorAll('.chips button').forEach((x) => x.classList.toggle('on', x === b));
+  renderProdutos();
+}));
+$('busca').addEventListener('input', renderProdutos);
+
+async function carregarProdutos() {
+  msg('msgProd', 'warn', 'Carregando…');
+  try { produtos = await run('listarProdutos'); msg('msgProd', '', ''); renderProdutos(); }
+  catch (e) { msg('msgProd', 'err', '❌ ' + esc(erroTxt(e))); }
+}
+
+function renderProdutos() {
+  const q = $('busca').value.trim().toLowerCase();
+  let l = produtos.filter((p) => (filtro === 'todos' || !p.dificuldade) && (!q || p.sku.toLowerCase().includes(q) || p.descricao.toLowerCase().includes(q)));
+  l.sort((a, b) => a.sku.localeCompare(b.sku, 'pt-BR', { numeric: true }));
+  const total = l.length; l = l.slice(0, 100);
+  $('listaProd').innerHTML = total
+    ? l.map((p) => `<div class="prod"><div><div class="sku">${esc(p.sku)}</div><div class="desc">${esc(p.descricao) || '—'}</div></div>
+        <div class="dif" data-sku="${esc(p.sku)}">${[1, 2, 3].map((n) => `<button class="d${n}${p.dificuldade === n ? ' on' : ''}" data-d="${n}">${['Simples', 'Médio', 'Difícil'][n - 1]}</button>`).join('')}</div></div>`).join('') +
+      (total > 100 ? `<div class="hint" style="padding-top:10px">Mostrando 100 de ${total}. Use a busca para refinar.</div>` : '')
+    : `<div class="empty">${filtro === 'pendentes' ? '🎉 Nenhum produto pendente.' : 'Nenhum produto encontrado.'}</div>`;
+}
+
+$('listaProd').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button[data-d]'); if (!b) return;
+  const wrap = b.parentElement, sku = wrap.dataset.sku, dif = +b.dataset.d;
+  wrap.querySelectorAll('button').forEach((x) => (x.disabled = true));
+  try {
+    const r = await run('classificarProduto', sku, dif);
+    const p = produtos.find((x) => x.sku === sku); if (p) p.dificuldade = dif;
+    setPendentes(r.pendentes); msg('msgProd', '', ''); renderProdutos();
+  } catch (e) {
+    msg('msgProd', 'err', '❌ ' + esc(erroTxt(e)));
+    wrap.querySelectorAll('button').forEach((x) => (x.disabled = false));
+  }
+});
+
+// ---------- início ----------
+(async function init() {
+  try {
+    const d = await run('getInitData');
+    $('data').value = d.hoje; $('ref').value = d.hoje;
+    $('sep').innerHTML = d.separadores.length
+      ? '<option value="">Selecione…</option>' + d.separadores.map((s) => `<option>${esc(s)}</option>`).join('')
+      : '<option value="">Cadastre os separadores na aba Colaboradores</option>';
+    $('modoTeste').hidden = !d.modoTeste;
+    setPendentes(d.pendentes); tabelaUltimos(d.ultimos);
+  } catch (e) {
+    msg('msgLancar', 'err', '❌ ' + esc(erroTxt(e)));
+  }
+})();
+</script>
+</body>
+</html>
