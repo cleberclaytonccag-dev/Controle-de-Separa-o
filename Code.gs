@@ -35,6 +35,9 @@ const CONFIG = {
   // Lote usado pela função testarAmber().
   TESTE_LOTE: '12345',
 
+  // Pedido usado pela função testarPedido() (diagnóstico de um pedido que não apareceu no lote).
+  TESTE_PEDIDO: '',
+
   // Nome da propriedade do script que guarda o token.
   PROP_TOKEN: 'AMBER_TOKEN',
   // (Opcional) Propriedade com o ID da planilha, se o script NÃO estiver vinculado a ela.
@@ -613,8 +616,39 @@ function testarAmber() {
     const a = JSON.parse(JSON.stringify(s.amostra)); delete a.etiquetas;
     Logger.log('Exemplo de pedido (sem etiquetas):\n' + JSON.stringify(a, null, 1).slice(0, 4000));
   }
+  const doLote = busca.pedidos.filter(function (p) { return Number(p.lotesep) === Number(lote); });
+  Logger.log('Pedidos do lote ' + lote + ': ' + doLote.length);
+  doLote.forEach(function (p) {
+    Logger.log('  pedido ' + p.pedido + ' | posição ' + p.posicao + ' | status ' + p.status + ' | data_pedido ' + p.data_pedido +
+      ' | itens: ' + (p.itens || []).map(function (i) { return '[' + i.codigo_interno + ' x' + i.quantidade + ']'; }).join(' '));
+    (p.itens || []).forEach(function (i) {
+      if (!String(i.codigo_interno == null ? '' : i.codigo_interno).trim() || !(Number(i.quantidade) > 0)) {
+        Logger.log('  ⚠️ item DESCARTADO no pedido ' + p.pedido + ' (sem codigo_interno ou quantidade <= 0): ' + JSON.stringify(i));
+      }
+    });
+  });
   const itens = agruparPorSku_(mapearItensAmber_(busca.pedidos, lote));
   Logger.log('Itens do lote ' + lote + ' (' + itens.length + ' SKUs): ' + JSON.stringify(completarDescricoes_(itens).slice(0, 30)));
+}
+
+/**
+ * Diagnóstico: consulta UM pedido pelo número (só leitura) e mostra posição, datas, lote e itens.
+ * Use quando um pedido que deveria estar no lote não apareceu. Informe o número em CONFIG.TESTE_PEDIDO
+ * (ou na propriedade do script TESTE_PEDIDO). Não mostra dados do cliente.
+ */
+function testarPedido() {
+  const num = Number(PropertiesService.getScriptProperties().getProperty('TESTE_PEDIDO') || CONFIG.TESTE_PEDIDO);
+  if (!num) throw new Error('Informe o número do pedido em CONFIG.TESTE_PEDIDO.');
+  const r = chamarAmber_([requisicaoAmber_('/pedidosvenda/consulta', { pedido: num })])[0];
+  const lista = (r && r.resultado && r.resultado.pedidos) || [];
+  if (!lista.length) { Logger.log('Amber: ' + JSON.stringify(r && r.mensagem) + ' (pedido ' + num + ' não encontrado)'); return; }
+  lista.forEach(function (p) {
+    Logger.log('Pedido ' + p.pedido + ' | posição ' + p.posicao + ' | status ' + p.status + ' | lotesep ' + p.lotesep +
+      ' | data_pedido ' + p.data_pedido + ' | data_aprovacao ' + p.data_aprovacao + ' | limite_postagem ' + p.data_limite_postagem +
+      ' | posicao_etiqueta ' + p.posicao_etiqueta + '\nitens: ' + JSON.stringify((p.itens || []).map(function (i) {
+        return { codigo_interno: i.codigo_interno, codigo_aton: i.codigo_aton, quantidade: i.quantidade };
+      })));
+  });
 }
 
 function gerarItensTeste_(lote) {
