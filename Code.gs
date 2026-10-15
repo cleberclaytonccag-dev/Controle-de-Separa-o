@@ -20,7 +20,7 @@ const CONFIG = {
 
   // Como achar os pedidos de um lote: busca pedidos por período e posição e filtra por "lotesep".
   AMBER_TIPO_DATA: 'data_pedido',                 // data_pedido | data_aprovacao | data_limite_postagem
-  AMBER_DIAS_ANTES: 3,                            // busca pedidos da data do lançamento até N dias antes
+  AMBER_DIAS_ANTES: 7,                            // busca pedidos da data do lançamento até N dias antes (pedidos antigos também entram em lote)
   AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO'],   // posições dos pedidos a varrer
   AMBER_PAGINA: 50,                               // máximo permitido pela API
   AMBER_CACHE_SEGUNDOS: 1800,                     // quanto tempo reaproveitar a varredura (30 min)
@@ -613,6 +613,12 @@ function testarAmber() {
   const porLote = {};
   busca.pedidos.forEach(function (p) { const k = String(p.lotesep); porLote[k] = (porLote[k] || 0) + 1; });
   Logger.log('Pedidos por lotesep (0 = sem lote): ' + JSON.stringify(porLote));
+  const porDia = {};
+  busca.pedidos.forEach(function (p) {
+    if (Number(p.lotesep) > 0) { const d = String(p.data_pedido).slice(0, 10); porDia[d] = (porDia[d] || 0) + 1; }
+  });
+  const dias = Object.keys(porDia).sort(function (a, b) { return a.split('/').reverse().join('').localeCompare(b.split('/').reverse().join('')); });
+  Logger.log('Pedidos EM LOTE por data_pedido (para escolher AMBER_DIAS_ANTES): ' + dias.map(function (d) { return d + '=' + porDia[d]; }).join(' | '));
   if (s.amostra) {
     const a = JSON.parse(JSON.stringify(s.amostra)); delete a.etiquetas;
     Logger.log('Exemplo de pedido (sem etiquetas):\n' + JSON.stringify(a, null, 1).slice(0, 4000));
