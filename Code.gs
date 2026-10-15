@@ -23,6 +23,7 @@ const CONFIG = {
   AMBER_DIAS_ANTES: 3,                            // busca pedidos da data do lançamento até N dias antes
   AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO'],   // posições dos pedidos a varrer
   AMBER_PAGINA: 50,                               // máximo permitido pela API
+  AMBER_CACHE_SEGUNDOS: 1800,                     // quanto tempo reaproveitar a varredura (30 min)
   AMBER_PARALELO: 4,                              // consultas simultâneas ao Amber (menos = mais gentil com o servidor)
   AMBER_OFFSET_MODO: 'auto',                      // auto | pagina | registro (como a API interpreta "offset")
 
@@ -336,15 +337,67 @@ function buscarItensLote_(lote, data) {
   if (!/^\d+$/.test(lote) || Number(lote) < 1) {
     throw new Error('No Amber o lote de separação é um número maior que zero. Confira o número digitado.');
   }
-  const busca = buscarPedidosAmber_(data);
-  const itens = mapearItensAmber_(busca.pedidos, lote);
-  if (!itens.length) {
+  // Uma varredura traz TODOS os lotes do período; guardamos num cache curto para os próximos lançamentos.
+  const chave = 'amber_idx_' + data + '_' + CONFIG.AMBER_DIAS_ANTES + '_' + CONFIG.AMBER_POSICOES.join('');
+  let indice = lerIndiceCache_(chave);
+  let busca = null;
+  if (!indice || !indice[lote]) {
+    busca = buscarPedidosAmber_(data);
+    indice = montarIndice_(busca.pedidos);
+    gravarIndiceCache_(chave, indice);
+  }
+  if (!indice[lote]) {
     throw new Error('Nenhum pedido do lote ' + lote + ' foi encontrado no Amber (pedidos de ' + busca.dataIni +
       ' a ' + busca.dataFim + ', posições: ' + CONFIG.AMBER_POSICOES.join(', ') + '; ' + busca.pedidos.length +
       ' pedidos analisados). Confira o número do lote. Se ele for mais antigo, aumente CONFIG.AMBER_DIAS_ANTES ' +
       'ou inclua a posição correta em CONFIG.AMBER_POSICOES.');
   }
-  return itens;
+  return indice[lote].map(function (x) { return { sku: x[0], descricao: '', qtd: x[1], codigoAton: x[2] }; });
+}
+
+/** { lote: [[sku, qtd, codigoAton], ...] } para todos os lotes (lotesep > 0) dos pedidos. */
+function montarIndice_(pedidos) {
+  const grupos = {};
+  pedidos.forEach(function (p) {
+    const l = Number(p.lotesep);
+    if (l > 0) (grupos[l] = grupos[l] || []).push(p);
+  });
+  const indice = {};
+  Object.keys(grupos).forEach(function (l) {
+    indice[l] = agruparPorSku_(mapearItensAmber_(grupos[l], l)).map(function (i) { return [i.sku, i.qtd, i.codigoAton]; });
+  });
+  return indice;
+}
+
+function lerIndiceCache_(chave) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const n = Number(cache.get(chave + ':n'));
+    if (!n) return null;
+    const partes = [];
+    for (let i = 0; i < n; i++) {
+      const parte = cache.get(chave + ':' + i);
+      if (parte == null) return null;
+      partes.push(parte);
+    }
+    return JSON.parse(partes.join(''));
+  } catch (e) {
+    return null;
+  }
+}
+
+function gravarIndiceCache_(chave, indice) {
+  try {
+    const txt = JSON.stringify(indice);
+    const TAM = 90000, n = Math.ceil(txt.length / TAM);
+    if (n > 9) return;                                   // grande demais para o cache: segue sem ele
+    const itens = {};
+    for (let i = 0; i < n; i++) itens[chave + ':' + i] = txt.slice(i * TAM, (i + 1) * TAM);
+    itens[chave + ':n'] = String(n);
+    CacheService.getScriptCache().putAll(itens, CONFIG.AMBER_CACHE_SEGUNDOS);
+  } catch (e) {
+    Logger.log('Cache não gravado: ' + e.message);
+  }
 }
 
 /**
@@ -420,6 +473,7 @@ function buscarPedidosAmber_(data) {
     }
   });
 
+  stats.segundos = Math.round((Date.now() - inicio) / 1000);
   return { pedidos: Object.keys(mapa).map(function (k) { return mapa[k]; }), dataIni: brIni, dataFim: brFim, stats: stats };
 }
 
@@ -551,7 +605,7 @@ function testarAmber() {
   const busca = buscarPedidosAmber_(hoje_());
   const s = busca.stats;
   Logger.log('Período ' + busca.dataIni + ' a ' + busca.dataFim + ' | ' + busca.pedidos.length + ' pedidos | chamadas: ' + s.chamadas +
-    ' | total por posição: ' + JSON.stringify(s.porPosicao) + ' | modo do offset: ' + s.modoOffset);
+    ' em ' + s.segundos + 's | total por posição: ' + JSON.stringify(s.porPosicao) + ' | modo do offset: ' + s.modoOffset);
   const porLote = {};
   busca.pedidos.forEach(function (p) { const k = String(p.lotesep); porLote[k] = (porLote[k] || 0) + 1; });
   Logger.log('Pedidos por lotesep (0 = sem lote): ' + JSON.stringify(porLote));

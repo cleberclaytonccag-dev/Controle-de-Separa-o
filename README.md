@@ -58,7 +58,9 @@ Apague a linha de exemplo.
 4. Com `MODO_TESTE = false`, rode **`testarAmber`**. O Registro de execução mostra: quantos pedidos vieram por posição, o modo de paginação detectado, quantos pedidos há por `lotesep`, um pedido de exemplo (sem etiquetas) e os itens do lote `CONFIG.TESTE_LOTE`. **Confira se o `lotesep` bate com os lotes que você conhece**, e ajuste `AMBER_POSICOES` e `AMBER_DIAS_ANTES` ao que o seu fluxo precisa (menos posições e menos dias = consulta mais rápida).
 5. Troque `CONFIG.MODO_TESTE` para `false` e rode `npx clasp push`.
 
-**Tempo de consulta:** cada lançamento varre os pedidos do período (50 por chamada, várias chamadas em paralelo). Com 800 a 900 pedidos por dia, uma janela de 3 dias e 4 posições, são dezenas de chamadas por lançamento. Se ficar lento, reduza `AMBER_DIAS_ANTES` e as posições. O limite do Apps Script é de 6 minutos por execução.
+**Tempo de consulta:** a primeira consulta varre os pedidos do período (50 por chamada). Com 3 dias e ~2.000 pedidos foram 44 chamadas e cerca de 1 minuto. Como a varredura traz **todos os lotes** do período, o resultado fica em cache por 30 minutos (`AMBER_CACHE_SEGUNDOS`) e os lançamentos seguintes saem na hora. Se um lote não estiver no cache, o sistema varre de novo. O limite do Apps Script é de 6 minutos por execução. Para acelerar, reduza `AMBER_DIAS_ANTES`.
+
+**Lote incompleto na janela:** se um lote tiver pedidos feitos antes do início da janela (`AMBER_DIAS_ANTES`), esses pedidos não entram. Teste com um lote antigo e compare com o Amber; se faltar item, aumente `AMBER_DIAS_ANTES`.
 
 ### 6. Autorizar
 
