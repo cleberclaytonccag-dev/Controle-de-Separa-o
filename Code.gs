@@ -23,6 +23,7 @@ const CONFIG = {
   AMBER_DIAS_ANTES: 3,                            // busca pedidos da data do lançamento até N dias antes
   AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO'],   // posições dos pedidos a varrer
   AMBER_PAGINA: 50,                               // máximo permitido pela API
+  AMBER_PARALELO: 4,                              // consultas simultâneas ao Amber (menos = mais gentil com o servidor)
   AMBER_OFFSET_MODO: 'auto',                      // auto | pagina | registro (como a API interpreta "offset")
 
   // Cabeçalhos da API (token em Authorization; Integrador = ATONAPI para integração direta).
@@ -411,11 +412,11 @@ function buscarPedidosAmber_(data) {
       if (r2 && modo === 'pagina' && off === 2) continue;      // a página 2 já veio na sondagem
       offsets.push(off);
     }
-    for (let i = 0; i < offsets.length; i += 15) {
+    for (let i = 0; i < offsets.length; i += CONFIG.AMBER_PARALELO) {
       if (Date.now() - inicio > 270000) {
         throw new Error('A consulta ao Amber demorou demais. Reduza CONFIG.AMBER_DIAS_ANTES ou as posições em CONFIG.AMBER_POSICOES.');
       }
-      pedir(offsets.slice(i, i + 15)).forEach(juntar);
+      pedir(offsets.slice(i, i + CONFIG.AMBER_PARALELO)).forEach(juntar);
     }
   });
 
@@ -505,7 +506,8 @@ function chamarAmber_(requisicoes) {
         throw new Error('O Amber recusou o acesso (HTTP ' + code + '). Verifique o token AMBER_TOKEN e o cabeçalho Integrador.');
       }
       if (code < 200 || code >= 300) {
-        throw new Error('O Amber respondeu com erro HTTP ' + code + '. Tente novamente; se persistir, avise o suporte.');
+        throw new Error('O Amber recusou a consulta (HTTP ' + code + '): ' + motivoAmber_(resp) + detalheConsulta_(requisicoes[i]) +
+          (code >= 500 ? ' Tente novamente; se persistir, avise o suporte.' : ''));
       }
       try {
         saida[i] = JSON.parse(resp.getContentText());
@@ -517,6 +519,25 @@ function chamarAmber_(requisicoes) {
     if (pendentes.length) Utilities.sleep(1500 * tentativa);
   }
   return saida;
+}
+
+/** Texto de erro devolvido pelo Amber (campo "mensagem" do JSON, ou o início da resposta). */
+function motivoAmber_(resp) {
+  const t = String(resp.getContentText() || '');
+  try {
+    const j = JSON.parse(t);
+    if (j && j.mensagem) return String(j.mensagem).slice(0, 300);
+  } catch (e) { /* não é JSON */ }
+  return t.replace(/\s+/g, ' ').slice(0, 300) || '(sem mensagem)';
+}
+
+/** Parâmetros da consulta (sem token) para ajudar a diagnosticar erros. */
+function detalheConsulta_(req) {
+  try {
+    const b = JSON.parse(req.payload);
+    delete b.produtos;
+    return ' [consulta: ' + JSON.stringify(b) + ']';
+  } catch (e) { return ''; }
 }
 
 /** Rode no editor (Executar > testarAmber) e veja o Registro de execução. Só faz consultas. */
