@@ -24,7 +24,7 @@ const CONFIG = {
   AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO'],   // posições dos pedidos a varrer
   AMBER_PAGINA: 50,                               // máximo permitido pela API
   AMBER_CACHE_SEGUNDOS: 1800,                     // quanto tempo reaproveitar a varredura (30 min)
-  AMBER_PARALELO: 4,                              // consultas simultâneas ao Amber (menos = mais gentil com o servidor)
+  AMBER_PARALELO: 2,                              // consultas simultâneas ao Amber (o servidor parece processar uma por vez; menos = mais estável)
   AMBER_OFFSET_MODO: 'auto',                      // auto | pagina | registro (como a API interpreta "offset")
 
   // Cabeçalhos da API (token em Authorization; Integrador = ATONAPI para integração direta).
@@ -558,7 +558,8 @@ function chamarAmber_(requisicoes) {
     respostas.forEach(function (resp, k) {
       const i = pendentes[k];
       const code = resp.getResponseCode();
-      if ((code === 429 || code >= 500) && tentativa < 3) { outra.push(i); return; }
+      // 429/5xx e também 400: o Aton às vezes devolve "Solicitação Inválida" de forma intermitente; tenta de novo.
+      if ((code === 400 || code === 429 || code >= 500) && tentativa < 3) { outra.push(i); return; }
       if (code === 401 || code === 403) {
         throw new Error('O Amber recusou o acesso (HTTP ' + code + '). Verifique o token AMBER_TOKEN e o cabeçalho Integrador.');
       }
@@ -573,7 +574,7 @@ function chamarAmber_(requisicoes) {
       }
     });
     pendentes = outra;
-    if (pendentes.length) Utilities.sleep(1500 * tentativa);
+    if (pendentes.length) Utilities.sleep(2000 * tentativa);
   }
   return saida;
 }
