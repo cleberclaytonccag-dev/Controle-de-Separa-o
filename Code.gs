@@ -12,17 +12,20 @@
 // CONFIGURAÇÃO
 // =====================================================================
 const CONFIG = {
-  // true  = gera itens fictícios (não chama o Amber). Mude para false quando o endpoint estiver pronto.
+  // true  = gera itens fictícios (não chama o Amber). Mude para false quando for usar o Amber de verdade.
   MODO_TESTE: true,
 
-  // URL do endpoint do Amber que retorna os itens de um lote de separação.
-  // Use {lote} no lugar do número do lote. >>> AJUSTE AQUI <<<
-  AMBER_URL: 'https://COLOQUE_AQUI_A_URL_DO_ENDPOINT/{lote}',
+  // Endereço base da API (documentação: "API Aton ERP (Pública)"). Não precisa mudar.
+  AMBER_BASE_URL: 'https://api.ambarxcall.com.br/AtonSNIsapi.dll/atonerp',
 
-  // Somente consulta. Qualquer valor diferente de GET é recusado por segurança.
-  AMBER_METODO: 'GET',
+  // Como achar os pedidos de um lote: busca pedidos por período e posição e filtra por "lotesep".
+  AMBER_TIPO_DATA: 'data_pedido',                 // data_pedido | data_aprovacao | data_limite_postagem
+  AMBER_DIAS_ANTES: 3,                            // busca pedidos da data do lançamento até N dias antes
+  AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO'],   // posições dos pedidos a varrer
+  AMBER_PAGINA: 50,                               // máximo permitido pela API
+  AMBER_OFFSET_MODO: 'auto',                      // auto | pagina | registro (como a API interpreta "offset")
 
-  // Cabeçalhos da API (conforme a documentação: token em Authorization, Integrador = ATONAPI).
+  // Cabeçalhos da API (token em Authorization; Integrador = ATONAPI para integração direta).
   AMBER_HEADER_AUTH: 'Authorization',
   AMBER_PREFIXO_TOKEN: '',        // ex.: 'Bearer ' se a API exigir. Vazio = token puro.
   AMBER_INTEGRADOR: 'ATONAPI',
@@ -136,17 +139,16 @@ function getInitData() {
 function salvarLancamento(dados) {
   const d = validarLancamento_(dados);
 
+  // Consulta ao Amber (só leitura) ANTES de travar a planilha: pode demorar e não deve bloquear os outros.
+  verificarLoteNaoLancado_(d.lote);
+  const itens = completarDescricoes_(agruparPorSku_(buscarItensLote_(d.lote, d.data)));
+
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) {
     throw new Error('O sistema está ocupado com outro lançamento. Aguarde alguns segundos e tente novamente.');
   }
   try {
-    if (separadorDoLote_(d.lote)) {
-      throw new Error('O lote ' + d.lote + ' já foi lançado (separador: ' + separadorDoLote_(d.lote) +
-        '). Um lote não pode ser lançado duas vezes.');
-    }
-
-    const itens = agruparPorSku_(buscarItensLote_(d.lote));
+    verificarLoteNaoLancado_(d.lote);       // confere de novo, já dentro do bloqueio (evita duplicidade)
     const novos = cadastrarProdutosNovos_(itens);
 
     const id = 'R' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyMMddHHmmss') +
@@ -313,130 +315,211 @@ function getPainel(periodo, ref) {
 }
 
 // =====================================================================
-// INTEGRAÇÃO COM O AMBER  (SOMENTE CONSULTA — nunca grava nada no Amber)
+// INTEGRAÇÃO COM O AMBER / ATON ERP  (SOMENTE CONSULTA — nunca altera nada no Amber)
+//
+// A API do Aton usa POST também para consultas. Por isso a segurança aqui é uma LISTA FIXA
+// de endpoints de consulta (ENDPOINTS_PERMITIDOS). Endpoints que gravam (PUT: atualizar pedidos,
+// estoques, baixas etc.) não existem neste código e são recusados por requisicaoAmber_().
+//
+// Como achamos os itens de um lote: a API não tem "itens do lote". Cada pedido de venda traz o
+// campo "lotesep" (lote de separação) e a lista "itens". Então buscamos os pedidos do período
+// (por posição, paginado) e filtramos os que têm lotesep == número do lote.
 // =====================================================================
-function buscarItensLote_(lote) {
+const ENDPOINTS_PERMITIDOS = [
+  '/pedidosvenda/consulta',     // consulta de pedidos de venda (itens + lotesep)
+  '/produtos/listagemid'        // consulta de produtos por ID (descrição)
+];
+
+function buscarItensLote_(lote, data) {
   if (CONFIG.MODO_TESTE) return gerarItensTeste_(lote);
-  const resposta = consultarAmber_(lote);
-  const itens = mapearItensAmber_(resposta.json);
+  if (!/^\d+$/.test(lote) || Number(lote) < 1) {
+    throw new Error('No Amber o lote de separação é um número maior que zero. Confira o número digitado.');
+  }
+  const busca = buscarPedidosAmber_(data);
+  const itens = mapearItensAmber_(busca.pedidos, lote);
   if (!itens.length) {
-    throw new Error('O Amber não retornou nenhum item para o lote ' + lote +
-      '. Confira o número do lote (ou ajuste mapearItensAmber_ se o formato da resposta for diferente).');
+    throw new Error('Nenhum pedido do lote ' + lote + ' foi encontrado no Amber (pedidos de ' + busca.dataIni +
+      ' a ' + busca.dataFim + ', posições: ' + CONFIG.AMBER_POSICOES.join(', ') + '; ' + busca.pedidos.length +
+      ' pedidos analisados). Confira o número do lote. Se ele for mais antigo, aumente CONFIG.AMBER_DIAS_ANTES ' +
+      'ou inclua a posição correta em CONFIG.AMBER_POSICOES.');
   }
   return itens;
 }
 
-/** Única função que fala com o Amber. Faz apenas GET, sem corpo (payload). */
-function consultarAmber_(lote) {
-  if (String(CONFIG.AMBER_METODO).toUpperCase() !== 'GET') {
-    throw new Error('Por segurança este sistema só faz consultas (GET) no Amber.');
+/**
+ * MAPEAMENTO ISOLADO: pedidos do Amber -> [{sku, descricao, qtd, codigoAton}] só do lote pedido.
+ * sku = codigo_interno do item. A descrição não vem no pedido; é completada por completarDescricoes_().
+ */
+function mapearItensAmber_(pedidos, lote) {
+  const alvo = Number(lote);
+  const itens = [];
+  pedidos.forEach(function (p) {
+    if (Number(p.lotesep) !== alvo) return;
+    (p.itens || []).forEach(function (i) {
+      const sku = String(i.codigo_interno == null ? '' : i.codigo_interno).trim();
+      const qtd = Number(i.quantidade);
+      if (!sku || !(qtd > 0)) return;
+      itens.push({ sku: sku, descricao: '', qtd: qtd, codigoAton: i.codigo_aton });
+    });
+  });
+  return itens;
+}
+
+/** Busca os pedidos do período em todas as posições configuradas (paginado, em paralelo). */
+function buscarPedidosAmber_(data) {
+  const inicio = Date.now();
+  const fim = parseData_(data);
+  const ini = somarDias_(fim, -CONFIG.AMBER_DIAS_ANTES);
+  const brIni = brData_(fmtData_(ini)), brFim = brData_(fmtData_(fim));
+  const limite = CONFIG.AMBER_PAGINA;
+  const mapa = {};
+  const stats = { porPosicao: {}, modoOffset: CONFIG.AMBER_OFFSET_MODO, chamadas: 0, amostra: null };
+
+  CONFIG.AMBER_POSICOES.forEach(function (pos) {
+    const corpo = function (offset) {
+      return { tipo_data: CONFIG.AMBER_TIPO_DATA, data_inicial: brIni, data_final: brFim, posicao: pos, offset: offset, limit: limite };
+    };
+    const pedir = function (offsets) {
+      stats.chamadas += offsets.length;
+      return chamarAmber_(offsets.map(function (o) { return requisicaoAmber_('/pedidosvenda/consulta', corpo(o)); }))
+        .map(resultadoPedidos_);
+    };
+    const juntar = function (r) {
+      r.pedidos.forEach(function (p) { mapa[p.pedido] = p; });
+      if (!stats.amostra && r.pedidos.length) stats.amostra = r.pedidos[0];
+    };
+
+    const r1 = pedir([1])[0];
+    juntar(r1);
+    stats.porPosicao[pos] = r1.total;
+    if (r1.total <= limite) return;
+
+    // offset = nº da página OU nº do registro? ("auto" testa a página 2 e vê se repete pedidos da 1)
+    let modo = CONFIG.AMBER_OFFSET_MODO;
+    let r2 = null;
+    if (modo === 'auto') {
+      r2 = pedir([2])[0];
+      juntar(r2);
+      const ids1 = {}; r1.pedidos.forEach(function (p) { ids1[p.pedido] = true; });
+      modo = r2.pedidos.some(function (p) { return ids1[p.pedido]; }) ? 'registro' : 'pagina';
+      stats.modoOffset = 'auto→' + modo;
+    }
+    const paginas = Math.ceil(r1.total / limite);
+    const offsets = [];
+    for (let k = 1; k < paginas; k++) {
+      const off = modo === 'registro' ? 1 + k * limite : 1 + k;
+      if (r2 && modo === 'pagina' && off === 2) continue;      // a página 2 já veio na sondagem
+      offsets.push(off);
+    }
+    for (let i = 0; i < offsets.length; i += 15) {
+      if (Date.now() - inicio > 270000) {
+        throw new Error('A consulta ao Amber demorou demais. Reduza CONFIG.AMBER_DIAS_ANTES ou as posições em CONFIG.AMBER_POSICOES.');
+      }
+      pedir(offsets.slice(i, i + 15)).forEach(juntar);
+    }
+  });
+
+  return { pedidos: Object.keys(mapa).map(function (k) { return mapa[k]; }), dataIni: brIni, dataFim: brFim, stats: stats };
+}
+
+function resultadoPedidos_(json) {
+  const status = String(json && json.status || '').toLowerCase();
+  const res = (json && json.resultado) || {};
+  if (status !== 'sucesso') {
+    if (/n[ãa]o.*encontrad|nenhum/i.test(String(json && json.mensagem || ''))) return { total: 0, pedidos: [] };
+    throw new Error('O Amber respondeu: ' + String(json && json.mensagem || 'erro desconhecido'));
+  }
+  const pedidos = res.pedidos || [];
+  return { total: Number(res.total) || pedidos.length, pedidos: pedidos };
+}
+
+/** Preenche a descrição dos itens: primeiro pela aba Produtos; o que faltar, consulta no Amber (50 por vez). */
+function completarDescricoes_(itens) {
+  if (CONFIG.MODO_TESTE) return itens;
+  const prod = mapaProdutos_();
+  itens.forEach(function (i) {
+    if (!i.descricao && prod[i.sku] && prod[i.sku].descricao) i.descricao = prod[i.sku].descricao;
+  });
+  const faltam = itens.filter(function (i) { return !i.descricao && i.codigoAton; });
+  const ids = [];
+  faltam.forEach(function (i) { if (ids.indexOf(i.codigoAton) < 0) ids.push(i.codigoAton); });
+  if (!ids.length) return itens;
+  try {
+    const lotes = [];
+    for (let k = 0; k < ids.length; k += 50) lotes.push(ids.slice(k, k + 50));
+    const resp = chamarAmber_(lotes.map(function (l) { return requisicaoAmber_('/produtos/listagemid', { produtos: l }); }));
+    const desc = {};
+    resp.forEach(function (r) {
+      ((r.resultado && r.resultado.produtos_encontrados) || []).forEach(function (p) { desc[p.codigo_aton] = p.descricao; });
+    });
+    faltam.forEach(function (i) { if (desc[i.codigoAton]) i.descricao = String(desc[i.codigoAton]); });
+  } catch (e) {
+    Logger.log('Não foi possível obter descrições no Amber (o lançamento segue sem elas): ' + e.message);
+  }
+  return itens;
+}
+
+/** Monta uma requisição de CONSULTA. Recusa qualquer endpoint fora da lista permitida. */
+function requisicaoAmber_(caminho, corpo) {
+  if (ENDPOINTS_PERMITIDOS.indexOf(caminho) < 0) {
+    throw new Error('Por segurança este sistema só chama endpoints de consulta do Amber. Endpoint recusado: ' + caminho);
   }
   const token = PropertiesService.getScriptProperties().getProperty(CONFIG.PROP_TOKEN);
   if (!token) {
     throw new Error('Token do Amber não configurado. Em Configurações do projeto > Propriedades do script, ' +
       'crie a propriedade ' + CONFIG.PROP_TOKEN + '.');
   }
-  if (CONFIG.AMBER_URL.indexOf('COLOQUE_AQUI') >= 0 || CONFIG.AMBER_URL.indexOf('{lote}') < 0) {
-    throw new Error('Endpoint do Amber não configurado. Ajuste CONFIG.AMBER_URL no Code.gs (use {lote}).');
-  }
-  const url = CONFIG.AMBER_URL.replace('{lote}', encodeURIComponent(lote));
-  if (url.indexOf('https://') !== 0) throw new Error('O endpoint do Amber deve começar com https://');
-
-  const headers = { Accept: 'application/json', Integrador: CONFIG.AMBER_INTEGRADOR };
+  if (CONFIG.AMBER_BASE_URL.indexOf('https://') !== 0) throw new Error('CONFIG.AMBER_BASE_URL deve começar com https://');
+  const headers = { Integrador: CONFIG.AMBER_INTEGRADOR };
   headers[CONFIG.AMBER_HEADER_AUTH] = CONFIG.AMBER_PREFIXO_TOKEN + token;
-  const opcoes = { method: 'get', headers: headers, muteHttpExceptions: true, followRedirects: true };
+  return {
+    url: CONFIG.AMBER_BASE_URL + caminho,
+    method: 'post',                       // a API do Aton consulta via POST (ver nota acima)
+    contentType: 'application/json',
+    headers: headers,
+    payload: JSON.stringify(corpo),
+    muteHttpExceptions: true,
+    followRedirects: true
+  };
+}
 
-  let resp;
-  for (let tentativa = 1; tentativa <= 3; tentativa++) {
+/** Executa as requisições (em paralelo) com até 3 tentativas para erros temporários. Retorna os JSONs. */
+function chamarAmber_(requisicoes) {
+  const saida = new Array(requisicoes.length);
+  let pendentes = requisicoes.map(function (_, i) { return i; });
+  for (let tentativa = 1; tentativa <= 3 && pendentes.length; tentativa++) {
+    let respostas;
     try {
-      resp = UrlFetchApp.fetch(url, opcoes);
+      respostas = UrlFetchApp.fetchAll(pendentes.map(function (i) { return requisicoes[i]; }));
     } catch (e) {
       if (tentativa === 3) throw new Error('Não foi possível conectar ao Amber: ' + e.message);
       Utilities.sleep(1500 * tentativa);
       continue;
     }
-    const code = resp.getResponseCode();
-    if ((code === 429 || code >= 500) && tentativa < 3) { Utilities.sleep(1500 * tentativa); continue; }
-    break;
+    const outra = [];
+    respostas.forEach(function (resp, k) {
+      const i = pendentes[k];
+      const code = resp.getResponseCode();
+      if ((code === 429 || code >= 500) && tentativa < 3) { outra.push(i); return; }
+      if (code === 401 || code === 403) {
+        throw new Error('O Amber recusou o acesso (HTTP ' + code + '). Verifique o token AMBER_TOKEN e o cabeçalho Integrador.');
+      }
+      if (code < 200 || code >= 300) {
+        throw new Error('O Amber respondeu com erro HTTP ' + code + '. Tente novamente; se persistir, avise o suporte.');
+      }
+      try {
+        saida[i] = JSON.parse(resp.getContentText());
+      } catch (e) {
+        throw new Error('A resposta do Amber não é um JSON válido.');
+      }
+    });
+    pendentes = outra;
+    if (pendentes.length) Utilities.sleep(1500 * tentativa);
   }
-
-  const code = resp.getResponseCode();
-  const texto = resp.getContentText();
-  if (code === 401 || code === 403) {
-    throw new Error('O Amber recusou o acesso (HTTP ' + code + '). Verifique o token AMBER_TOKEN e o cabeçalho Integrador.');
-  }
-  if (code === 404) throw new Error('Lote ' + lote + ' não encontrado no Amber (HTTP 404).');
-  if (code < 200 || code >= 300) {
-    throw new Error('O Amber respondeu com erro HTTP ' + code + '. Tente novamente; se persistir, avise o suporte.');
-  }
-  let json;
-  try {
-    json = JSON.parse(texto);
-  } catch (e) {
-    throw new Error('A resposta do Amber não é um JSON válido.');
-  }
-  return { code: code, texto: texto, json: json };
+  return saida;
 }
 
-/**
- * MAPEAMENTO ISOLADO: JSON do Amber -> [{sku, descricao, qtd}].
- * Se os nomes dos campos do seu Amber forem outros, ajuste as listas abaixo.
- * Rode testarAmber() para ver a resposta crua e conferir os campos.
- */
-function mapearItensAmber_(json) {
-  const CAMPOS_SKU = ['sku', 'codigo', 'codigoProduto', 'codigo_produto', 'cod_produto', 'codProduto', 'referencia'];
-  const CAMPOS_DESC = ['descricao', 'descricaoProduto', 'descricao_produto', 'nome', 'nomeProduto', 'produto'];
-  const CAMPOS_QTD = ['quantidade', 'qtd', 'qtde', 'quantidadeSeparar', 'quantidade_separar', 'qtdSeparar'];
-
-  const lista = encontrarLista_(json, 0);
-  const itens = [];
-  lista.forEach(function (el) {
-    if (!el || typeof el !== 'object') return;
-    // Se o produto vier aninhado (ex.: { produto: { sku, descricao }, quantidade }), achata um nível.
-    const plano = Object.assign({}, el.produto && typeof el.produto === 'object' ? el.produto : {}, el);
-    const sku = pegar_(plano, CAMPOS_SKU);
-    const qtd = paraNumero_(pegar_(plano, CAMPOS_QTD));
-    if (sku === '' || sku == null || !(qtd > 0)) return;
-    let desc = pegar_(plano, CAMPOS_DESC);
-    if (desc && typeof desc === 'object') desc = '';
-    itens.push({ sku: String(sku).trim(), descricao: String(desc || '').trim(), qtd: qtd });
-  });
-  return itens;
-}
-
-function encontrarLista_(obj, nivel) {
-  if (Array.isArray(obj)) return obj;
-  if (!obj || typeof obj !== 'object' || nivel > 3) return [];
-  const preferidas = ['itens', 'items', 'produtos', 'data', 'dados', 'result', 'resultado', 'lista'];
-  for (let i = 0; i < preferidas.length; i++) {
-    const v = obj[preferidas[i]];
-    if (v != null && typeof v === 'object') {
-      const r = encontrarLista_(v, nivel + 1);
-      if (r.length) return r;
-    }
-  }
-  const chaves = Object.keys(obj);
-  for (let j = 0; j < chaves.length; j++) {
-    const v = obj[chaves[j]];
-    if (v != null && typeof v === 'object') {
-      const r = encontrarLista_(v, nivel + 1);
-      if (r.length) return r;
-    }
-  }
-  return [];
-}
-
-function pegar_(obj, chaves) {
-  const mapa = {};
-  Object.keys(obj).forEach(function (k) { mapa[k.toLowerCase()] = k; });
-  for (let i = 0; i < chaves.length; i++) {
-    const real = mapa[chaves[i].toLowerCase()];
-    if (real !== undefined && obj[real] !== null && obj[real] !== '') return obj[real];
-  }
-  return '';
-}
-
-/** Rode no editor (Executar > testarAmber) e veja o resultado em Execuções/Registro. */
+/** Rode no editor (Executar > testarAmber) e veja o Registro de execução. Só faz consultas. */
 function testarAmber() {
   const lote = String(PropertiesService.getScriptProperties().getProperty('TESTE_LOTE') || CONFIG.TESTE_LOTE);
   Logger.log('MODO_TESTE = ' + CONFIG.MODO_TESTE + ' | lote = ' + lote);
@@ -444,9 +527,19 @@ function testarAmber() {
     Logger.log('MODO_TESTE está ligado: a API NÃO será chamada. Itens fictícios: ' + JSON.stringify(gerarItensTeste_(lote)));
     return;
   }
-  const r = consultarAmber_(lote);
-  Logger.log('HTTP ' + r.code + ' — resposta crua (até 8000 caracteres):\n' + r.texto.slice(0, 8000));
-  Logger.log('Itens mapeados: ' + JSON.stringify(mapearItensAmber_(r.json)));
+  const busca = buscarPedidosAmber_(hoje_());
+  const s = busca.stats;
+  Logger.log('Período ' + busca.dataIni + ' a ' + busca.dataFim + ' | ' + busca.pedidos.length + ' pedidos | chamadas: ' + s.chamadas +
+    ' | total por posição: ' + JSON.stringify(s.porPosicao) + ' | modo do offset: ' + s.modoOffset);
+  const porLote = {};
+  busca.pedidos.forEach(function (p) { const k = String(p.lotesep); porLote[k] = (porLote[k] || 0) + 1; });
+  Logger.log('Pedidos por lotesep (0 = sem lote): ' + JSON.stringify(porLote));
+  if (s.amostra) {
+    const a = JSON.parse(JSON.stringify(s.amostra)); delete a.etiquetas;
+    Logger.log('Exemplo de pedido (sem etiquetas):\n' + JSON.stringify(a, null, 1).slice(0, 4000));
+  }
+  const itens = agruparPorSku_(mapearItensAmber_(busca.pedidos, lote));
+  Logger.log('Itens do lote ' + lote + ' (' + itens.length + ' SKUs): ' + JSON.stringify(completarDescricoes_(itens).slice(0, 30)));
 }
 
 function gerarItensTeste_(lote) {
@@ -516,7 +609,7 @@ function agruparPorSku_(itens) {
   const ordem = [];
   itens.forEach(function (i) {
     const sku = String(i.sku).trim();
-    if (!mapa[sku]) { mapa[sku] = { sku: sku, descricao: i.descricao || '', qtd: 0 }; ordem.push(sku); }
+    if (!mapa[sku]) { mapa[sku] = { sku: sku, descricao: i.descricao || '', qtd: 0, codigoAton: i.codigoAton }; ordem.push(sku); }
     mapa[sku].qtd += Number(i.qtd) || 0;
     if (!mapa[sku].descricao && i.descricao) mapa[sku].descricao = i.descricao;
   });
@@ -574,6 +667,13 @@ function listarSeparadores_() {
       return String(r[0]).trim() !== '' && ativo !== 'NAO';
     })
     .map(function (r) { return String(r[0]).trim(); });
+}
+
+function verificarLoteNaoLancado_(lote) {
+  const sep = separadorDoLote_(lote);
+  if (sep) {
+    throw new Error('O lote ' + lote + ' já foi lançado (separador: ' + sep + '). Um lote não pode ser lançado duas vezes.');
+  }
 }
 
 /** Retorna o separador do lote se ele já foi lançado, senão ''. */
@@ -645,6 +745,7 @@ function hoje_() { return Utilities.formatDate(new Date(), Session.getScriptTime
 function pad2_(n) { return (n < 10 ? '0' : '') + n; }
 function parseData_(s) { const p = s.split('-'); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2])); }
 function fmtData_(d) { return d.getUTCFullYear() + '-' + pad2_(d.getUTCMonth() + 1) + '-' + pad2_(d.getUTCDate()); }
+function brData_(iso) { const p = iso.split('-'); return p[2] + '/' + p[1] + '/' + p[0]; }
 function somarDias_(d, n) { return new Date(d.getTime() + n * 86400000); }
 function dataValida_(s) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(String(s || ''))) return false;

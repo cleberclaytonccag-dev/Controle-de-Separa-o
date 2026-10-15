@@ -2,7 +2,7 @@
 
 Web App em Google Apps Script que usa uma planilha do Google Sheets como banco de dados e consulta o Amber (Aton ERP) para trazer os itens de cada lote de separação.
 
-> **O Amber é usado só para consulta.** O código faz apenas `GET`, sem corpo, em um único ponto (`consultarAmber_`). Qualquer método diferente de GET é recusado. O sistema não cria, altera nem apaga nada no Amber.
+> **O Amber é usado só para consulta.** A API do Aton faz consultas via `POST`, então a proteção é uma **lista fixa de dois endpoints de consulta** (`ENDPOINTS_PERMITIDOS` no `Code.gs`): `pedidosvenda/consulta` e `produtos/listagemid`. Os endpoints que alteram dados (os `PUT`: atualizar pedidos, estoques, baixas etc.) não são chamados em lugar nenhum, e `requisicaoAmber_()` recusa qualquer endereço fora da lista. O sistema não cria, altera nem apaga nada no Amber.
 
 ## Arquivos
 
@@ -52,12 +52,13 @@ Apague a linha de exemplo.
 
 ### 5. Conectar ao Amber
 
-1. **Token:** Editor → ⚙️ **Configurações do projeto** → **Propriedades do script** → adicione `AMBER_TOKEN` = sua chave. Nunca coloque o token no código.
-2. **Endpoint:** em `Code.gs`, ajuste `CONFIG.AMBER_URL` com `{lote}` no lugar do número do lote. Veja a seção "Endpoint pendente" abaixo.
-3. **Cabeçalhos:** já vão `Authorization: <token>` e `Integrador: ATONAPI`. Se a API exigir um prefixo (ex.: `Bearer `), use `CONFIG.AMBER_PREFIXO_TOKEN`.
-4. Rode **`testarAmber`** (com `MODO_TESTE = false`). O **Registro de execução** mostra a resposta crua do lote de `CONFIG.TESTE_LOTE` e os itens mapeados.
-   Se os nomes dos campos forem outros, ajuste as listas dentro de `mapearItensAmber_` (é a única função a mexer).
+1. **Token:** Editor → ⚙️ **Configurações do projeto** → **Propriedades do script** → adicione `AMBER_TOKEN` = sua chave. Nunca coloque o token no código nem em conversas.
+2. **Endereço da API:** já está em `CONFIG.AMBER_BASE_URL` (`https://api.ambarxcall.com.br/AtonSNIsapi.dll/atonerp`), conforme a documentação. Os cabeçalhos `Authorization` (token) e `Integrador: ATONAPI` também já estão configurados.
+3. **Como o lote é encontrado:** a API não tem um endpoint "itens do lote". Cada pedido de venda traz o campo **`lotesep`** (lote de separação) e a lista de itens. O sistema consulta os pedidos de venda de `AMBER_DIAS_ANTES` dias até a data do lançamento, nas posições de `AMBER_POSICOES`, filtra os pedidos com `lotesep` igual ao lote, e soma os itens por SKU (`codigo_interno`). A descrição vem de `produtos/listagemid` (só para SKUs que ainda não estão na aba Produtos).
+4. Com `MODO_TESTE = false`, rode **`testarAmber`**. O Registro de execução mostra: quantos pedidos vieram por posição, o modo de paginação detectado, quantos pedidos há por `lotesep`, um pedido de exemplo (sem etiquetas) e os itens do lote `CONFIG.TESTE_LOTE`. **Confira se o `lotesep` bate com os lotes que você conhece**, e ajuste `AMBER_POSICOES` e `AMBER_DIAS_ANTES` ao que o seu fluxo precisa (menos posições e menos dias = consulta mais rápida).
 5. Troque `CONFIG.MODO_TESTE` para `false` e rode `npx clasp push`.
+
+**Tempo de consulta:** cada lançamento varre os pedidos do período (50 por chamada, várias chamadas em paralelo). Com 800 a 900 pedidos por dia, uma janela de 3 dias e 4 posições, são dezenas de chamadas por lançamento. Se ficar lento, reduza `AMBER_DIAS_ANTES` e as posições. O limite do Apps Script é de 6 minutos por execução.
 
 ### 6. Autorizar
 
@@ -86,6 +87,8 @@ Pelo clasp: `npx clasp deploy`. O acesso vem do `appsscript.json` (padrão `MYSE
 - **Painel:** Pontos = quantidade × dificuldade. Pontos/hora da equipe = pontos totais ÷ horas totais trabalhadas. Semana = segunda a domingo. O ranking é ordenado por pontos/hora. Itens sem classificação aparecem em "Simples" até serem classificados.
 - **Corrigir um lançamento errado:** apague a linha do lote em **Registros** e as linhas com o mesmo `ID_Registro` em **Itens_Lote**. Depois lance de novo.
 
-## Endpoint pendente
+## Limites e pontos de atenção
 
-Não consegui abrir a documentação do Postman (https://documenter.getpostman.com/view/12902127/VV4tUJaC) a partir do ambiente de desenvolvimento, porque a rede bloqueia o domínio. Por isso **`CONFIG.AMBER_URL` ainda é um placeholder**. Preciso do endpoint que retorna os itens de um lote de separação (método GET, com o número do lote) para fechar essa parte.
+- **Lote em outra posição ou data:** o sistema só encontra pedidos cujas posições estão em `AMBER_POSICOES` e cuja data de pedido está dentro da janela. Se um lote retornar "nenhum pedido encontrado", confira o número e amplie a janela.
+- **Lote sem pedidos no Amber:** `lotesep = 0` significa "sem lote". O app não aceita lote 0 nem lotes com letras ao consultar o Amber (no `MODO_TESTE` aceita).
+- **Paginação:** a documentação não diz se `offset` é o número da página ou do registro. Com `AMBER_OFFSET_MODO: 'auto'` o sistema detecta sozinho; depois de rodar `testarAmber` você pode fixar `'pagina'` ou `'registro'`.
