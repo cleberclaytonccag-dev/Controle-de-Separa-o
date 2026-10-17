@@ -21,7 +21,7 @@ const CONFIG = {
   // Como achar os pedidos de um lote: busca pedidos por período e posição e filtra por "lotesep".
   AMBER_TIPO_DATA: 'data_pedido',                 // data_pedido | data_aprovacao | data_limite_postagem
   AMBER_DIAS_ANTES: 7,                            // busca pedidos da data do lançamento até N dias antes (pedidos antigos também entram em lote)
-  AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO'],   // posições dos pedidos a varrer
+  AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO', 'CANCELADO'],   // posições dos pedidos a varrer (CANCELADO entra: o pedido foi separado e cancelado depois)
   AMBER_PAGINA: 50,                               // máximo permitido pela API
   AMBER_CACHE_SEGUNDOS: 1800,                     // quanto tempo reaproveitar a varredura (30 min)
   AMBER_PARALELO: 2,                              // consultas simultâneas ao Amber (o servidor parece processar uma por vez; menos = mais estável)
@@ -613,6 +613,10 @@ function testarAmber() {
   const porLote = {};
   busca.pedidos.forEach(function (p) { const k = String(p.lotesep); porLote[k] = (porLote[k] || 0) + 1; });
   Logger.log('Pedidos por lotesep (0 = sem lote): ' + JSON.stringify(porLote));
+  const cancelados = busca.pedidos.filter(function (p) { return p.posicao === 'CANCELADO'; });
+  Logger.log('Pedidos CANCELADOS no período: ' + cancelados.length + ' | desses, com lote (lotesep > 0): ' +
+    cancelados.filter(function (p) { return Number(p.lotesep) > 0; }).length +
+    ' (se for 0 com cancelados existindo, o Amber zera o lote ao cancelar e esses itens não podem ser recuperados)');
   const histograma = function (campo) {
     const h = {};
     busca.pedidos.forEach(function (p) {
