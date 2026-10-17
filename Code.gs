@@ -613,12 +613,17 @@ function testarAmber() {
   const porLote = {};
   busca.pedidos.forEach(function (p) { const k = String(p.lotesep); porLote[k] = (porLote[k] || 0) + 1; });
   Logger.log('Pedidos por lotesep (0 = sem lote): ' + JSON.stringify(porLote));
-  const porDia = {};
-  busca.pedidos.forEach(function (p) {
-    if (Number(p.lotesep) > 0) { const d = String(p.data_pedido).slice(0, 10); porDia[d] = (porDia[d] || 0) + 1; }
-  });
-  const dias = Object.keys(porDia).sort(function (a, b) { return a.split('/').reverse().join('').localeCompare(b.split('/').reverse().join('')); });
-  Logger.log('Pedidos EM LOTE por data_pedido (para escolher AMBER_DIAS_ANTES): ' + dias.map(function (d) { return d + '=' + porDia[d]; }).join(' | '));
+  const histograma = function (campo) {
+    const h = {};
+    busca.pedidos.forEach(function (p) {
+      if (Number(p.lotesep) > 0) { const d = String(p[campo]).slice(0, 10); h[d] = (h[d] || 0) + 1; }
+    });
+    const chave = function (d) { return d.split('/').reverse().join(''); };
+    return Object.keys(h).sort(function (x, y) { return chave(x).localeCompare(chave(y)); })
+      .map(function (d) { return d + '=' + h[d]; }).join(' | ');
+  };
+  Logger.log('Pedidos EM LOTE por data_pedido (para escolher AMBER_DIAS_ANTES): ' + histograma('data_pedido'));
+  Logger.log('Pedidos EM LOTE por data_limite_postagem (30/12/1899 = sem data): ' + histograma('data_limite_postagem'));
   if (s.amostra) {
     const a = JSON.parse(JSON.stringify(s.amostra)); delete a.etiquetas;
     Logger.log('Exemplo de pedido (sem etiquetas):\n' + JSON.stringify(a, null, 1).slice(0, 4000));
