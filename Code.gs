@@ -156,12 +156,17 @@ function getInitData() {
   };
 }
 
+/**
+ * Lança o separador do lote (data, lote, nome, início, término). Com o Amber ligado NÃO consulta nada:
+ * os itens do lote são preenchidos depois, pelo botão "Atualizar itens do dia" (indiceEtapa + indicePreencher).
+ * No MODO_TESTE os itens fictícios são gravados na hora.
+ */
 function salvarLancamento(dados) {
   const d = validarLancamento_(dados);
-
-  // Consulta ao Amber (só leitura) ANTES de travar a planilha: pode demorar e não deve bloquear os outros.
+  if (!CONFIG.MODO_TESTE && (!/^\d+$/.test(d.lote) || Number(d.lote) < 1)) {
+    throw new Error('No Amber o lote de separação é um número maior que zero. Confira o número digitado.');
+  }
   verificarLoteNaoLancado_(d.lote);
-  const itens = completarDescricoes_(agruparPorSku_(buscarItensLote_(d.lote, d.data, d.forcar)));
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) {
@@ -169,26 +174,27 @@ function salvarLancamento(dados) {
   }
   try {
     verificarLoteNaoLancado_(d.lote);       // confere de novo, já dentro do bloqueio (evita duplicidade)
-    const novos = cadastrarProdutosNovos_(itens);
 
+    const itens = CONFIG.MODO_TESTE ? agruparPorSku_(gerarItensTeste_(d.lote)) : null;
+    const novos = itens ? cadastrarProdutosNovos_(itens) : 0;
     const id = 'R' + Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyMMddHHmmss') +
-      '-' + Utilities.getUuid().slice(0, 4);
-    const totalItens = itens.reduce(function (s, i) { return s + i.qtd; }, 0);
+      '-' + Utilities.getUuid().slice(0, 8);
+    const totalItens = itens ? itens.reduce(function (s, i) { return s + i.qtd; }, 0) : '';   // '' = aguardando itens
     const agora = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm:ss');
 
     const shItens = aba_(ABAS.ITENS);
     const shReg = aba_(ABAS.REGISTROS);
     const linhaIni = shItens.getLastRow() + 1;
-
-    const linhas = itens.map(function (i) {
-      return [id, d.data, d.lote, d.separador, i.sku, i.descricao, i.qtd];
-    });
-    shItens.getRange(linhaIni, 1, linhas.length, 7).setValues(linhas);
+    if (itens) {
+      shItens.getRange(linhaIni, 1, itens.length, 7).setValues(itens.map(function (i) {
+        return [id, d.data, d.lote, d.separador, i.sku, i.descricao, i.qtd];
+      }));
+    }
     try {
       shReg.getRange(shReg.getLastRow() + 1, 1, 1, 9)
         .setValues([[id, d.data, d.lote, d.separador, d.inicio, d.termino, d.duracao, totalItens, agora]]);
     } catch (e) {
-      shItens.deleteRows(linhaIni, linhas.length);   // desfaz para não deixar itens órfãos
+      if (itens) shItens.deleteRows(linhaIni, itens.length);   // desfaz para não deixar itens órfãos
       throw e;
     }
     SpreadsheetApp.flush();
@@ -198,11 +204,13 @@ function salvarLancamento(dados) {
       lote: d.lote,
       separador: d.separador,
       duracao: d.duracao,
-      totalItens: totalItens,
-      skus: itens.length,
+      aguardandoItens: !itens,
+      totalItens: itens ? totalItens : 0,
+      skus: itens ? itens.length : 0,
       novosProdutos: novos,
       pendentes: contarPendentes_(),
-      ultimos: ultimosRegistros_(12)
+      ultimos: ultimosRegistros_(12),
+      indice: statusIndiceSeguro_()
     };
   } finally {
     lock.releaseLock();
@@ -268,6 +276,7 @@ function getPainel(periodo, ref) {
     c.min += Number(r[6]) || 0;
   });
 
+  const semItens = regs.filter(function (r) { return String(r[7]) === ''; }).map(function (r) { return String(r[2]); });
   const pendentes = {};
   itens.forEach(function (r) {
     const c = obter(String(r[3]));
@@ -329,6 +338,7 @@ function getPainel(periodo, ref) {
         serie: faixa.dias.map(function (d) { return r2(c.diario[d] || 0); })
       };
     }),
+    lotesSemItens: semItens,
     pendentesTotal: listaPend.length,
     pendentes: listaPend.slice(0, 30)
   };
@@ -349,14 +359,6 @@ const ENDPOINTS_PERMITIDOS = [
   '/pedidosvenda/consulta',     // consulta de pedidos de venda (itens + lotesep)
   '/produtos/listagemid'        // consulta de produtos por ID (descrição)
 ];
-
-function buscarItensLote_(lote, data, forcar) {
-  if (CONFIG.MODO_TESTE) return gerarItensTeste_(lote);
-  if (!/^\d+$/.test(lote) || Number(lote) < 1) {
-    throw new Error('No Amber o lote de separação é um número maior que zero. Confira o número digitado.');
-  }
-  return itensDoLoteIndice_(Number(lote), forcar === true);
-}
 
 // =====================================================================
 // ÍNDICE DE LOTES (aba Indice_Amber)
@@ -389,7 +391,7 @@ function indiceStatus() {
   const meta = lerMeta_();
   const sh = aba_(ABAS.INDICE);
   const linhas = Math.max(0, sh.getLastRow() - 1);
-  if (!meta) return { existe: false, emAndamento: false, linhas: linhas };
+  if (!meta) return { existe: false, emAndamento: false, linhas: linhas, aguardando: contarSemItens_() };
   const total = meta.feitos.length + meta.pendentes.length;
   return {
     existe: true,
@@ -397,6 +399,8 @@ function indiceStatus() {
     concluidoEm: meta.concluidoEm || '',
     iniciadoEm: meta.iniciadoEm,
     m0: meta.m0,
+    confirmadoAte: meta.confirmadoAte || 0,
+    aguardando: contarSemItens_(),
     feitos: meta.feitos.length,
     total: total,
     linhas: linhas
@@ -414,7 +418,7 @@ function indiceIniciar() {
     }
     gravarMeta_({
       iniciadoEm: agoraTxt_(), ultimaEtapaEm: new Date().toISOString(), concluidoEm: '',
-      m0: 0, feitos: [], pendentes: indiceDias_()
+      m0: 0, estavel: false, confirmadoAte: 0, feitos: [], pendentes: indiceDias_().concat(['#fim'])
     });
     return indiceStatus();
   } finally {
@@ -433,20 +437,23 @@ function indiceEtapa() {
     const inicio = Date.now();
     const ultima = sh.getLastRow();
     let linhas = ultima < 2 ? [] : sh.getRange(2, 1, ultima - 1, ABAS.INDICE.cab.length).getValues();
-    const limiteJanela = meta.pendentes.concat(meta.feitos.map(function (f) { return f.dia; })).sort()[0];
+    const limiteJanela = meta.pendentes.concat(meta.feitos.map(function (f) { return f.dia; }))
+      .filter(function (x) { return x !== '#fim'; }).sort()[0];
     linhas = linhas.filter(function (r) { return txtData_(r[1]) >= limiteJanela; });   // descarta o que saiu da janela
 
     try {
       let feitosNaEtapa = 0;
       while (meta.pendentes.length && (feitosNaEtapa === 0 || Date.now() - inicio < CONFIG.AMBER_ORCAMENTO_SEG * 1000)) {
         feitosNaEtapa++;
-        const dia = meta.pendentes[0];
+        const marca = meta.pendentes[0];
+        const dia = marca === '#fim' ? hoje_() : marca;    // '#fim' = relê o dia mais recente para checar se surgiu lote novo
         const busca = buscarPedidosPeriodo_(dia, dia);
         const doDia = [];
         busca.pedidos.forEach(function (p) {
           const lote = Number(p.lotesep);
           if (!(lote > 0)) return;
-          if (meta.feitos.length < 2) meta.m0 = Math.max(meta.m0, lote);     // 2 dias mais recentes definem m0
+          if (marca === '#fim') meta.m1 = Math.max(meta.m1 || 0, lote);
+          else if (meta.feitos.length < 2) meta.m0 = Math.max(meta.m0, lote);     // 2 dias mais recentes definem m0
           (p.itens || []).forEach(function (i) {
             const sku = String(i.codigo_interno == null ? '' : i.codigo_interno).trim();
             const qtd = Number(i.quantidade);
@@ -457,6 +464,7 @@ function indiceEtapa() {
         linhas = linhas.filter(function (r) { return txtData_(r[1]) !== dia; }).concat(doDia);
         meta.feitos.push({ dia: dia, em: agoraTxt_(), pedidos: busca.pedidos.length });
         meta.pendentes.shift();
+        if (marca === '#fim') meta.estavel = !((meta.m1 || 0) > meta.m0);   // sem lote novo durante a leitura
         meta.ultimaEtapaEm = new Date().toISOString();
       }
     } finally {
@@ -466,7 +474,10 @@ function indiceEtapa() {
         if (sh.getMaxRows() < linhas.length + 1) sh.insertRowsAfter(sh.getMaxRows(), linhas.length + 1 - sh.getMaxRows());
         sh.getRange(2, 1, linhas.length, ABAS.INDICE.cab.length).setValues(linhas);
       }
-      if (!meta.pendentes.length) meta.concluidoEm = agoraTxt_();
+      if (!meta.pendentes.length) {
+        meta.concluidoEm = agoraTxt_();
+        meta.confirmadoAte = meta.estavel ? 1e12 : meta.m0;     // estável: todos os lotes lidos valem; senão só os <= m0
+      }
       gravarMeta_(meta);
       SpreadsheetApp.flush();
     }
@@ -476,31 +487,82 @@ function indiceEtapa() {
   }
 }
 
-function itensDoLoteIndice_(lote, forcar) {
+
+/** Quantos lançamentos ainda aguardam os itens do Amber (Total_Itens em branco). */
+function contarSemItens_() {
+  const sh = aba_(ABAS.REGISTROS);
+  const last = sh.getLastRow();
+  if (last < 2) return 0;
+  return sh.getRange(2, 8, last - 1, 1).getValues().filter(function (r) { return String(r[0]) === ''; }).length;
+}
+
+/**
+ * Passo final da atualização: para cada lançamento sem itens, copia do índice os itens do lote para a aba
+ * Itens_Lote e preenche Total_Itens. Lotes que não estão no índice (ou não confirmados) ficam aguardando.
+ */
+function indicePreencher() {
+  if (CONFIG.MODO_TESTE) throw new Error('O MODO_TESTE está ligado: os itens fictícios já são gravados no lançamento.');
   const meta = lerMeta_();
-  const dica = ' Clique em "Atualizar índice" (aba Lançar) e tente de novo.';
-  if (!meta || !meta.feitos.length) {
-    throw new Error('LOTE_SEM_INDICE: O índice de lotes do Amber ainda não foi criado.' + dica);
+  if (!meta || !meta.concluidoEm) throw new Error('Atualize o índice antes de preencher os itens.');
+
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('O sistema está ocupado. Tente novamente em alguns segundos.');
+  try {
+    const shReg = aba_(ABAS.REGISTROS), shIt = aba_(ABAS.ITENS), shIdx = aba_(ABAS.INDICE);
+    const ultReg = shReg.getLastRow();
+    const regs = ultReg < 2 ? [] : shReg.getRange(2, 1, ultReg - 1, 9).getValues();
+    const faltam = [];
+    regs.forEach(function (r, i) { if (String(r[7]) === '') faltam.push({ linha: i + 2, id: r[0], data: txtData_(r[1]), lote: Number(r[2]), loteTxt: String(r[2]), sep: String(r[3]) }); });
+    const res = { preenchidos: 0, naoEncontrados: [], naoConfirmados: [], novosProdutos: 0, totalItens: 0 };
+    if (!faltam.length) return Object.assign(res, { pendentes: contarPendentes_(), indice: indiceStatus() });
+
+    // itens já gravados por tentativa anterior interrompida (evita duplicar)
+    const ultIt = shIt.getLastRow();
+    const jaTem = {};
+    if (ultIt >= 2) shIt.getRange(2, 1, ultIt - 1, 7).getValues().forEach(function (r) { jaTem[r[0]] = (jaTem[r[0]] || 0) + (Number(r[6]) || 0); });
+
+    // índice por lote
+    const ultIdx = shIdx.getLastRow();
+    const porLote = {};
+    if (ultIdx >= 2) {
+      shIdx.getRange(2, 1, ultIdx - 1, ABAS.INDICE.cab.length).getValues().forEach(function (r) {
+        (porLote[Number(r[2])] = porLote[Number(r[2])] || []).push({ sku: String(r[3]).trim(), descricao: '', qtd: Number(r[4]) || 0, codigoAton: r[5] });
+      });
+    }
+
+    const ate = meta.confirmadoAte == null ? meta.m0 : meta.confirmadoAte;
+    const prontos = [];
+    faltam.forEach(function (f) {
+      if (jaTem[f.id] != null) { shReg.getRange(f.linha, 8).setValue(jaTem[f.id]); res.preenchidos++; res.totalItens += jaTem[f.id]; return; }
+      if (!porLote[f.lote]) { res.naoEncontrados.push(f.loteTxt); return; }
+      if (f.lote > ate) { res.naoConfirmados.push(f.loteTxt); return; }
+      prontos.push({ f: f, itens: agruparPorSku_(porLote[f.lote]) });
+    });
+
+    if (prontos.length) {
+      const todos = [];
+      prontos.forEach(function (p) { p.itens.forEach(function (i) { todos.push(i); }); });
+      completarDescricoes_(todos);                                  // preenche descrições (aba Produtos ou Amber)
+      const unicos = agruparPorSku_(todos);
+      res.novosProdutos = cadastrarProdutosNovos_(unicos);
+      const linhas = [];
+      prontos.forEach(function (p) {
+        p.itens.forEach(function (i) { linhas.push([p.f.id, p.f.data, p.f.loteTxt, p.f.sep, i.sku, i.descricao, i.qtd]); });
+      });
+      shIt.getRange(shIt.getLastRow() + 1, 1, linhas.length, 7).setValues(linhas);
+      prontos.forEach(function (p) {
+        const total = p.itens.reduce(function (t, i) { return t + i.qtd; }, 0);
+        shReg.getRange(p.f.linha, 8).setValue(total);
+        res.preenchidos++; res.totalItens += total;
+      });
+      SpreadsheetApp.flush();
+    }
+    res.pendentes = contarPendentes_();
+    res.indice = indiceStatus();
+    return res;
+  } finally {
+    lock.releaseLock();
   }
-  if (!meta.concluidoEm) {
-    throw new Error('LOTE_SEM_INDICE: A atualização do índice não terminou.' + dica);
-  }
-  const sh = aba_(ABAS.INDICE);
-  const ultima = sh.getLastRow();
-  const linhas = ultima < 2 ? [] : sh.getRange(2, 1, ultima - 1, ABAS.INDICE.cab.length).getValues()
-    .filter(function (r) { return Number(r[2]) === lote; });
-  if (!linhas.length) {
-    throw new Error('LOTE_NAO_ENCONTRADO: O lote ' + lote + ' não está no índice (atualizado em ' + meta.concluidoEm +
-      ', lotes até ' + meta.m0 + '). Se ele foi gerado depois disso, atualize o índice. Se foi antes, confira o número do lote.');
-  }
-  if (lote > meta.m0 && !forcar) {
-    throw new Error('LOTE_NAO_CONFIRMADO: O lote ' + lote + ' foi encontrado, mas pode ter sido gerado durante a atualização do índice ' +
-      '(lotes confirmados até ' + meta.m0 + ') e estar incompleto. Atualize o índice. Se o lote só tem pedidos antigos e você ' +
-      'já conferiu os itens no Amber, pode lançar mesmo assim.');
-  }
-  return agruparPorSku_(linhas.map(function (r) {
-    return { sku: String(r[3]).trim(), descricao: '', qtd: Number(r[4]) || 0, codigoAton: r[5] };
-  })).map(function (i) { return { sku: i.sku, descricao: '', qtd: i.qtd, codigoAton: i.codigoAton }; });
 }
 
 function agoraTxt_() { return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm'); }
@@ -827,7 +889,7 @@ function validarLancamento_(dados) {
   if (duracao < 0) duracao += 1440;           // virou a meia-noite
 
   return {
-    data: data, lote: lote, separador: separador, forcar: dados.forcar === true,
+    data: data, lote: lote, separador: separador,
     inicio: pad2_(Math.floor(mi / 60)) + ':' + pad2_(mi % 60),
     termino: pad2_(Math.floor(mt / 60)) + ':' + pad2_(mt % 60),
     duracao: duracao
@@ -927,7 +989,7 @@ function ultimosRegistros_(n) {
     return {
       data: txtData_(r[1]), lote: String(r[2]), separador: String(r[3]),
       inicio: txtHora_(r[4]), termino: txtHora_(r[5]),
-      duracao: Number(r[6]) || 0, itens: Number(r[7]) || 0
+      duracao: Number(r[6]) || 0, itens: Number(r[7]) || 0, aguardando: String(r[7]) === ''
     };
   });
 }

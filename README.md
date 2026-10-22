@@ -57,15 +57,18 @@ Apague a linha de exemplo.
 3. **Endereço e cabeçalhos:** já estão em `CONFIG` (`AMBER_BASE_URL`, `Authorization` = token, `Integrador: ATONAPI`).
 4. Troque `CONFIG.MODO_TESTE` para `false` e faça `clasp push` (ou cole o código de novo) e uma nova versão da implantação.
 
-**Como o lote é encontrado:** a API não tem endpoint "itens do lote". Cada pedido de venda traz o campo **`lotesep`** (lote de separação) e a lista de itens. Como um pedido agendado de até 30 dias atrás pode entrar num lote de hoje, o sistema mantém na aba **Indice_Amber** os itens de todos os pedidos que estão em algum lote nos últimos `AMBER_DIAS_INDICE` dias (30). O lançamento só lê essa aba, então sai na hora. A descrição dos produtos novos vem de `produtos/listagemid`. Pedidos **cancelados** depois de gerar o lote continuam contando (a separação foi feita).
+**Como funciona:** a API do Aton não tem endpoint "itens do lote". Cada pedido de venda traz o campo **`lotesep`** (lote de separação) e a lista de itens. Como um pedido agendado de até 30 dias atrás pode entrar num lote de hoje, o sistema lê os pedidos dos últimos `AMBER_DIAS_INDICE` dias (30), guarda na aba **Indice_Amber** os que estão em algum lote e, a partir dela, preenche os itens de cada lançamento. A descrição dos produtos novos vem de `produtos/listagemid`. Pedidos **cancelados** depois de gerar o lote continuam contando (a separação foi feita).
 
 **Rotina do dia:**
-1. Gere os lotes no Amber (de manhã, por exemplo).
-2. No app, aba **Lançar**, clique em **Atualizar índice**. Leva alguns minutos (30 dias × 5 posições, em etapas, com barra de progresso). Deixe a página aberta. Se der erro ou você fechar, clique de novo e ele continua de onde parou.
-3. Lance os lotes à medida que a separação termina.
-4. Se gerar lotes novos depois, clique em **Atualizar índice** de novo. Lotes já indexados não mudam, pois um lote fica fixo depois de gerado.
+1. Gere os lotes no Amber normalmente.
+2. Ao longo do dia, lance cada separação no app (aba **Lançar**): data, número do lote, separador, início e término. **Nada é consultado no Amber nesse momento**: o lançamento fica com o ícone ⏳ (aguardando itens).
+3. **Uma vez ao dia, no fim da tarde**, com todos os lotes já gerados, clique em **Atualizar itens do dia**. A barra de progresso mostra a leitura do Amber (alguns minutos; deixe a página aberta) e, no fim, os itens são gravados em todos os lançamentos pendentes. Se der erro ou você fechar a página, clique de novo: continua de onde parou.
+4. Só depois disso o painel tem os itens e pontos desses lotes (até lá ele avisa quais lotes ainda estão sem itens).
+5. Lançamentos feitos depois da atualização ficam pendentes até a atualização do dia seguinte (que também preenche pendências antigas).
 
-**Regra de segurança do índice:** a atualização lê primeiro os dias mais recentes e anota o maior número de lote visto. Todo lote com número até esse valor já existia quando a atualização começou, então foi lido por completo. Um lote acima disso (gerado durante a atualização) aparece como "não confirmado": atualize o índice de novo. Se o lote só tem pedidos antigos e você já conferiu no Amber, existe o botão **Lançar mesmo assim**. Evite gerar lotes ou mexer em pedidos enquanto a atualização roda.
+**Resultado da atualização:** o app informa quantos lançamentos foram preenchidos e lista (a) **lotes não encontrados** no Amber, geralmente número digitado errado: corrija ou apague o lançamento na planilha (aba Registros) e lance de novo; (b) **lotes gerados durante a leitura**: clique em "Atualizar itens do dia" de novo. Não gere lotes nem mexa em pedidos enquanto a atualização roda.
+
+**Regra de segurança:** a atualização lê primeiro os dias mais recentes e anota o maior número de lote visto, e no fim relê o dia mais recente. Se nenhum lote novo surgiu nesse intervalo, todos os lotes lidos são confirmados. Se surgiu, só valem os lotes até o maior número visto no início; os demais ficam pendentes até a próxima atualização.
 
 **Conferir a integração:** com `MODO_TESTE = false`, a função **`testarAmber`** (só consulta) mostra no Registro de execução quantos pedidos vêm por posição, quantos pedidos há por `lotesep`, se pedidos cancelados mantêm o lote, a distribuição das datas e os itens do lote `CONFIG.TESTE_LOTE`. **`testarPedido`** mostra a posição, as datas e o lote de um pedido (`CONFIG.TESTE_PEDIDO`), para investigar um item que não apareceu.
 
@@ -90,7 +93,7 @@ Pelo clasp: `npx clasp deploy`. O acesso vem do `appsscript.json` (padrão `MYSE
 
 ## Como funciona
 
-- **Lançamento:** valida os dados, consulta o Amber pelo lote e grava o registro e os itens agrupados por SKU. Um lote só pode ser lançado uma vez, e o salvamento usa `LockService`. Se o Amber falhar, nada é gravado.
+- **Lançamento:** valida os dados e grava o registro (aba Registros). Um lote só pode ser lançado uma vez, e o salvamento usa `LockService`. Os itens do lote (agrupados por SKU) são gravados na atualização do fim do dia; no `MODO_TESTE` são gravados na hora.
 - **Duração:** término − início em minutos. Se o término for menor, considera virada da meia-noite. Término igual ao início é recusado.
 - **Dificuldade:** SKU inédito entra em **Produtos** com dificuldade em branco (pendente). O peso é lido da planilha na hora de gerar o painel, então classificar um produto vale também para lotes antigos. Pendente = peso 1, com aviso no painel.
 - **Painel:** Pontos = quantidade × dificuldade. Pontos/hora da equipe = pontos totais ÷ horas totais trabalhadas. Semana = segunda a domingo. O ranking é ordenado por pontos/hora. Itens sem classificação aparecem em "Simples" até serem classificados.
@@ -99,7 +102,7 @@ Pelo clasp: `npx clasp deploy`. O acesso vem do `appsscript.json` (padrão `MYSE
 ## Limites e pontos de atenção
 
 - **Janela do índice:** só cobre `AMBER_DIAS_INDICE` dias (30). Pedidos mais antigos que isso, dentro de um lote, não entram. Aumente o valor se precisar (a atualização fica mais longa).
-- **Um lote só é lançado depois de indexado:** o app mostra "lote não encontrado no índice" se ele foi gerado depois da última atualização.
+- **Lote digitado errado:** só é descoberto na atualização dos itens (lote não encontrado). Corrija na planilha.
 - **Lote 0 / com letras:** no Amber `lotesep = 0` significa "sem lote". Com o Amber ligado, o app só aceita lotes numéricos maiores que zero (no `MODO_TESTE` aceita qualquer um).
 - **Carga no Amber:** cada atualização completa faz centenas de consultas (leitura). Faça quando precisar, não de hora em hora. Cada consulta tem até 3 tentativas para erros temporários do servidor.
 - **Cota do Google:** cada atualização completa consome parte do limite diário de consultas externas e de tempo de execução do Apps Script; confira os limites atuais da sua conta (Gmail ou Workspace) na documentação do Google.
