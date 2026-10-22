@@ -53,14 +53,21 @@ Apague a linha de exemplo.
 ### 5. Conectar ao Amber
 
 1. **Token:** Editor → ⚙️ **Configurações do projeto** → **Propriedades do script** → adicione `AMBER_TOKEN` = sua chave. Nunca coloque o token no código nem em conversas.
-2. **Endereço da API:** já está em `CONFIG.AMBER_BASE_URL` (`https://api.ambarxcall.com.br/AtonSNIsapi.dll/atonerp`), conforme a documentação. Os cabeçalhos `Authorization` (token) e `Integrador: ATONAPI` também já estão configurados.
-3. **Como o lote é encontrado:** a API não tem um endpoint "itens do lote". Cada pedido de venda traz o campo **`lotesep`** (lote de separação) e a lista de itens. O sistema consulta os pedidos de venda de `AMBER_DIAS_ANTES` dias até a data do lançamento, nas posições de `AMBER_POSICOES` (inclui `CANCELADO`, porque pedido cancelado depois de gerar o lote continua contando na separação), filtra os pedidos com `lotesep` igual ao lote, e soma os itens por SKU (`codigo_interno`). A descrição vem de `produtos/listagemid` (só para SKUs que ainda não estão na aba Produtos).
-4. Com `MODO_TESTE = false`, rode **`testarAmber`**. O Registro de execução mostra: quantos pedidos vieram por posição, o modo de paginação detectado, quantos pedidos há por `lotesep`, um pedido de exemplo (sem etiquetas) e os itens do lote `CONFIG.TESTE_LOTE`. **Confira se o `lotesep` bate com os lotes que você conhece**, e ajuste `AMBER_POSICOES` e `AMBER_DIAS_ANTES` ao que o seu fluxo precisa (menos posições e menos dias = consulta mais rápida).
-5. Troque `CONFIG.MODO_TESTE` para `false` e rode `npx clasp push`.
+2. **Rode `setup` de novo** (é seguro repetir): ele cria a aba **Indice_Amber**, usada pelo índice de lotes.
+3. **Endereço e cabeçalhos:** já estão em `CONFIG` (`AMBER_BASE_URL`, `Authorization` = token, `Integrador: ATONAPI`).
+4. Troque `CONFIG.MODO_TESTE` para `false` e faça `clasp push` (ou cole o código de novo) e uma nova versão da implantação.
 
-**Tempo de consulta:** a primeira consulta varre os pedidos do período (50 por chamada). Com 3 dias e ~2.000 pedidos foram 44 chamadas e cerca de 1 minuto (a janela padrão agora é de 7 dias, então a primeira consulta leva mais). Como a varredura traz **todos os lotes** do período, o resultado fica em cache por 30 minutos (`AMBER_CACHE_SEGUNDOS`) e os lançamentos seguintes saem na hora. Se um lote não estiver no cache, o sistema varre de novo. O limite do Apps Script é de 6 minutos por execução. Para acelerar, reduza `AMBER_DIAS_ANTES`.
+**Como o lote é encontrado:** a API não tem endpoint "itens do lote". Cada pedido de venda traz o campo **`lotesep`** (lote de separação) e a lista de itens. Como um pedido agendado de até 30 dias atrás pode entrar num lote de hoje, o sistema mantém na aba **Indice_Amber** os itens de todos os pedidos que estão em algum lote nos últimos `AMBER_DIAS_INDICE` dias (30). O lançamento só lê essa aba, então sai na hora. A descrição dos produtos novos vem de `produtos/listagemid`. Pedidos **cancelados** depois de gerar o lote continuam contando (a separação foi feita).
 
-**Lote incompleto na janela:** se um lote tiver pedidos feitos antes do início da janela (`AMBER_DIAS_ANTES`), esses pedidos não entram. Teste com um lote antigo e compare com o Amber; se faltar item, aumente `AMBER_DIAS_ANTES`.
+**Rotina do dia:**
+1. Gere os lotes no Amber (de manhã, por exemplo).
+2. No app, aba **Lançar**, clique em **Atualizar índice**. Leva alguns minutos (30 dias × 5 posições, em etapas, com barra de progresso). Deixe a página aberta. Se der erro ou você fechar, clique de novo e ele continua de onde parou.
+3. Lance os lotes à medida que a separação termina.
+4. Se gerar lotes novos depois, clique em **Atualizar índice** de novo. Lotes já indexados não mudam, pois um lote fica fixo depois de gerado.
+
+**Regra de segurança do índice:** a atualização lê primeiro os dias mais recentes e anota o maior número de lote visto. Todo lote com número até esse valor já existia quando a atualização começou, então foi lido por completo. Um lote acima disso (gerado durante a atualização) aparece como "não confirmado": atualize o índice de novo. Se o lote só tem pedidos antigos e você já conferiu no Amber, existe o botão **Lançar mesmo assim**. Evite gerar lotes ou mexer em pedidos enquanto a atualização roda.
+
+**Conferir a integração:** com `MODO_TESTE = false`, a função **`testarAmber`** (só consulta) mostra no Registro de execução quantos pedidos vêm por posição, quantos pedidos há por `lotesep`, se pedidos cancelados mantêm o lote, a distribuição das datas e os itens do lote `CONFIG.TESTE_LOTE`. **`testarPedido`** mostra a posição, as datas e o lote de um pedido (`CONFIG.TESTE_PEDIDO`), para investigar um item que não apareceu.
 
 ### 6. Autorizar
 
@@ -91,6 +98,8 @@ Pelo clasp: `npx clasp deploy`. O acesso vem do `appsscript.json` (padrão `MYSE
 
 ## Limites e pontos de atenção
 
-- **Lote em outra posição ou data:** o sistema só encontra pedidos cujas posições estão em `AMBER_POSICOES` e cuja data de pedido está dentro da janela. Se um lote retornar "nenhum pedido encontrado", confira o número e amplie a janela.
-- **Lote sem pedidos no Amber:** `lotesep = 0` significa "sem lote". O app não aceita lote 0 nem lotes com letras ao consultar o Amber (no `MODO_TESTE` aceita).
-- **Paginação:** a documentação não diz se `offset` é o número da página ou do registro. Com `AMBER_OFFSET_MODO: 'auto'` o sistema detecta sozinho; depois de rodar `testarAmber` você pode fixar `'pagina'` ou `'registro'`.
+- **Janela do índice:** só cobre `AMBER_DIAS_INDICE` dias (30). Pedidos mais antigos que isso, dentro de um lote, não entram. Aumente o valor se precisar (a atualização fica mais longa).
+- **Um lote só é lançado depois de indexado:** o app mostra "lote não encontrado no índice" se ele foi gerado depois da última atualização.
+- **Lote 0 / com letras:** no Amber `lotesep = 0` significa "sem lote". Com o Amber ligado, o app só aceita lotes numéricos maiores que zero (no `MODO_TESTE` aceita qualquer um).
+- **Carga no Amber:** cada atualização completa faz centenas de consultas (leitura). Faça quando precisar, não de hora em hora. Cada consulta tem até 3 tentativas para erros temporários do servidor.
+- **Cota do Google:** cada atualização completa consome parte do limite diário de consultas externas e de tempo de execução do Apps Script; confira os limites atuais da sua conta (Gmail ou Workspace) na documentação do Google.

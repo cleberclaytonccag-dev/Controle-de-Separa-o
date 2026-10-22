@@ -67,6 +67,8 @@
   .dif button.d1.on { background:var(--ok); border-color:var(--ok); color:#fff; } .dif button.d2.on { background:var(--med); border-color:var(--med); color:#1d2433; } .dif button.d3.on { background:var(--dif); border-color:var(--dif); color:#fff; }
   .chips button { margin-right:6px; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+  .progress { height:10px; border-radius:6px; background:var(--line); overflow:hidden; margin-top:10px; }
+  .progress i { display:block; height:100%; width:0; background:var(--pri); transition:width .3s; }
   .empty { color:var(--mut); text-align:center; padding:24px 0; }
 </style>
 </head>
@@ -98,6 +100,14 @@
         <div style="margin-top:14px"><button class="btn" id="btnSalvar" type="submit">Salvar lançamento</button></div>
       </form>
       <div id="msgLancar"></div>
+    </div>
+    <div class="card" id="cardIndice">
+      <h2>Índice de lotes do Amber</h2>
+      <div class="hint" id="indiceTxt" style="margin:-6px 0 10px">Carregando…</div>
+      <button class="btn sec" id="btnIndice" type="button">Atualizar índice</button>
+      <div class="progress" id="indiceBar" hidden><i></i></div>
+      <div id="msgIndice"></div>
+      <div class="hint" style="margin-top:10px">Gere os lotes no Amber e, <b>antes de lançar</b>, atualize o índice (leva alguns minutos). Cada lote lança na hora depois disso.</div>
     </div>
     <div class="card">
       <h2>Últimos lançamentos</h2>
@@ -182,18 +192,63 @@ function tabelaUltimos(l) {
     : '<tbody><tr><td class="empty" style="text-align:center">Nenhum lançamento ainda.</td></tr></tbody>';
 }
 
+let forcar = false;
+function dadosForm() {
+  return { data: $('data').value, lote: $('lote').value, separador: $('sep').value, inicio: $('ini').value, termino: $('fim').value, forcar };
+}
+
+// ---------- índice de lotes ----------
+function mostrarIndice(s) {
+  if (!s) return;
+  if (s.semAba) { $('indiceTxt').textContent = 'Aba Indice_Amber não existe: rode a função setup() no editor do Apps Script.'; return; }
+  if (!s.existe) $('indiceTxt').textContent = 'O índice ainda não foi criado.';
+  else if (s.emAndamento) $('indiceTxt').textContent = `Atualização incompleta (${s.feitos} de ${s.total} dias). Clique para continuar.`;
+  else $('indiceTxt').textContent = `Atualizado em ${s.concluidoEm.slice(8, 10)}/${s.concluidoEm.slice(5, 7)} ${s.concluidoEm.slice(11)} · lotes confirmados até ${s.m0} · ${nf(s.linhas, 0)} linhas.`;
+}
+
+$('btnIndice').addEventListener('click', async () => {
+  const btn = $('btnIndice'), bar = $('indiceBar');
+  btn.disabled = true; msg('msgIndice', '', ''); bar.hidden = false;
+  try {
+    let s = await run('indiceIniciar');
+    while (s.emAndamento) {
+      bar.firstElementChild.style.width = Math.round(100 * s.feitos / s.total) + '%';
+      $('indiceTxt').textContent = `Atualizando… ${s.feitos} de ${s.total} dias lidos. Não feche esta página.`;
+      s = await run('indiceEtapa');
+    }
+    bar.firstElementChild.style.width = '100%';
+    mostrarIndice(s);
+    msg('msgIndice', 'ok', '✅ Índice atualizado.');
+  } catch (e) {
+    msg('msgIndice', 'err', '❌ ' + esc(erroTxt(e)) + '<br>Clique em "Atualizar índice" para continuar de onde parou.');
+    run('getInitData').then((d) => mostrarIndice(d.indice)).catch(() => {});
+  } finally {
+    btn.disabled = false; setTimeout(() => { bar.hidden = true; }, 1500);
+  }
+});
+
 $('form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const btn = $('btnSalvar'); btn.disabled = true; btn.textContent = 'Consultando o Amber e salvando…'; msg('msgLancar', '', '');
   try {
-    const r = await run('salvarLancamento', { data: $('data').value, lote: $('lote').value, separador: $('sep').value, inicio: $('ini').value, termino: $('fim').value });
+    const r = await run('salvarLancamento', dadosForm());
     let h = `✅ Lote <b>${esc(r.lote)}</b> salvo para <b>${esc(r.separador)}</b>: ${nf(r.totalItens, 0)} itens em ${r.skus} SKUs, duração ${r.duracao} min.`;
     if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) cadastrado(s) — falta classificar a dificuldade na aba Produtos.`;
     msg('msgLancar', 'ok', h);
     tabelaUltimos(r.ultimos); setPendentes(r.pendentes);
+    forcar = false;
     $('ini').value = $('fim').value; $('fim').value = ''; $('lote').value = ''; atualizarDuracao(); $('lote').focus();
   } catch (e) {
-    msg('msgLancar', 'err', '❌ ' + esc(erroTxt(e)));
+    const t = erroTxt(e);
+    const m = /^(LOTE_[A-Z_]+):\s*/.exec(t);
+    const limpo = esc(t.replace(/^LOTE_[A-Z_]+:\s*/, ''));
+    forcar = false;
+    if (m && m[1] === 'LOTE_NAO_CONFIRMADO') {
+      msg('msgLancar', 'warn', '⚠️ ' + limpo + '<div style="margin-top:10px"><button class="btn sec" id="btnForcar" type="button">Lançar mesmo assim</button></div>');
+      $('btnForcar').onclick = () => { forcar = true; $('form').requestSubmit(); };
+    } else {
+      msg('msgLancar', 'err', '❌ ' + limpo);
+    }
   } finally {
     btn.disabled = false; btn.textContent = 'Salvar lançamento';
   }
@@ -320,7 +375,8 @@ $('listaProd').addEventListener('click', async (ev) => {
       ? '<option value="">Selecione…</option>' + d.separadores.map((s) => `<option>${esc(s)}</option>`).join('')
       : '<option value="">Cadastre os separadores na aba Colaboradores</option>';
     $('modoTeste').hidden = !d.modoTeste;
-    setPendentes(d.pendentes); tabelaUltimos(d.ultimos);
+    setPendentes(d.pendentes); tabelaUltimos(d.ultimos); mostrarIndice(d.indice);
+    $('cardIndice').hidden = !!d.modoTeste;
   } catch (e) {
     msg('msgLancar', 'err', '❌ ' + esc(erroTxt(e)));
   }

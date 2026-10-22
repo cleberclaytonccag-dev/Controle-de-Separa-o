@@ -23,9 +23,10 @@ const CONFIG = {
   AMBER_DIAS_ANTES: 7,                            // busca pedidos da data do lançamento até N dias antes (pedidos antigos também entram em lote)
   AMBER_POSICOES: ['PENDENTE', 'ABERTA', 'FECHADO', 'EMITIDO', 'CANCELADO'],   // posições dos pedidos a varrer (CANCELADO entra: o pedido foi separado e cancelado depois)
   AMBER_PAGINA: 50,                               // máximo permitido pela API
-  AMBER_CACHE_SEGUNDOS: 1800,                     // quanto tempo reaproveitar a varredura (30 min)
+  AMBER_DIAS_INDICE: 30,                          // quantos dias para trás o índice de lotes cobre (pedidos agendados)
+  AMBER_ORCAMENTO_SEG: 170,                       // tempo de cada etapa da atualização do índice (limite do Apps Script: 360 s)
   AMBER_PARALELO: 2,                              // consultas simultâneas ao Amber (o servidor parece processar uma por vez; menos = mais estável)
-  AMBER_OFFSET_MODO: 'auto',                      // auto | pagina | registro (como a API interpreta "offset")
+  AMBER_OFFSET_MODO: 'pagina',                    // pagina | registro | auto (nesta API, offset = nº da página; 'auto' testa a cada consulta)
 
   // Cabeçalhos da API (token em Authorization; Integrador = ATONAPI para integração direta).
   AMBER_HEADER_AUTH: 'Authorization',
@@ -59,6 +60,11 @@ const ABAS = {
     nome: 'Produtos',
     cab: ['SKU', 'Descricao', 'Dificuldade', 'Cadastrado_em'],
     texto: [1, 4]
+  },
+  INDICE: {
+    nome: 'Indice_Amber',
+    cab: ['Pedido', 'Data_pedido', 'Lote', 'SKU', 'Quantidade', 'Codigo_Aton', 'Posicao'],
+    texto: [2, 4, 7]
   },
   COLABORADORES: {
     nome: 'Colaboradores',
@@ -131,8 +137,17 @@ function setup() {
 // =====================================================================
 // API CHAMADA PELO FRONT-END (google.script.run)
 // =====================================================================
+function statusIndiceSeguro_() {
+  try {
+    return indiceStatus();
+  } catch (e) {
+    return { existe: false, emAndamento: false, linhas: 0, semAba: true };    // falta rodar setup() de novo
+  }
+}
+
 function getInitData() {
   return {
+    indice: statusIndiceSeguro_(),
     hoje: hoje_(),
     modoTeste: CONFIG.MODO_TESTE,
     separadores: listarSeparadores_(),
@@ -146,7 +161,7 @@ function salvarLancamento(dados) {
 
   // Consulta ao Amber (só leitura) ANTES de travar a planilha: pode demorar e não deve bloquear os outros.
   verificarLoteNaoLancado_(d.lote);
-  const itens = completarDescricoes_(agruparPorSku_(buscarItensLote_(d.lote, d.data)));
+  const itens = completarDescricoes_(agruparPorSku_(buscarItensLote_(d.lote, d.data, d.forcar)));
 
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) {
@@ -335,73 +350,160 @@ const ENDPOINTS_PERMITIDOS = [
   '/produtos/listagemid'        // consulta de produtos por ID (descrição)
 ];
 
-function buscarItensLote_(lote, data) {
+function buscarItensLote_(lote, data, forcar) {
   if (CONFIG.MODO_TESTE) return gerarItensTeste_(lote);
   if (!/^\d+$/.test(lote) || Number(lote) < 1) {
     throw new Error('No Amber o lote de separação é um número maior que zero. Confira o número digitado.');
   }
-  // Uma varredura traz TODOS os lotes do período; guardamos num cache curto para os próximos lançamentos.
-  const chave = 'amber_idx_' + data + '_' + CONFIG.AMBER_DIAS_ANTES + '_' + CONFIG.AMBER_POSICOES.join('');
-  let indice = lerIndiceCache_(chave);
-  let busca = null;
-  if (!indice || !indice[lote]) {
-    busca = buscarPedidosAmber_(data);
-    indice = montarIndice_(busca.pedidos);
-    gravarIndiceCache_(chave, indice);
-  }
-  if (!indice[lote]) {
-    throw new Error('Nenhum pedido do lote ' + lote + ' foi encontrado no Amber (pedidos de ' + busca.dataIni +
-      ' a ' + busca.dataFim + ', posições: ' + CONFIG.AMBER_POSICOES.join(', ') + '; ' + busca.pedidos.length +
-      ' pedidos analisados). Confira o número do lote. Se ele for mais antigo, aumente CONFIG.AMBER_DIAS_ANTES ' +
-      'ou inclua a posição correta em CONFIG.AMBER_POSICOES.');
-  }
-  return indice[lote].map(function (x) { return { sku: x[0], descricao: '', qtd: x[1], codigoAton: x[2] }; });
+  return itensDoLoteIndice_(Number(lote), forcar === true);
 }
 
-/** { lote: [[sku, qtd, codigoAton], ...] } para todos os lotes (lotesep > 0) dos pedidos. */
-function montarIndice_(pedidos) {
-  const grupos = {};
-  pedidos.forEach(function (p) {
-    const l = Number(p.lotesep);
-    if (l > 0) (grupos[l] = grupos[l] || []).push(p);
-  });
-  const indice = {};
-  Object.keys(grupos).forEach(function (l) {
-    indice[l] = agruparPorSku_(mapearItensAmber_(grupos[l], l)).map(function (i) { return [i.sku, i.qtd, i.codigoAton]; });
-  });
-  return indice;
+// =====================================================================
+// ÍNDICE DE LOTES (aba Indice_Amber)
+//
+// A API do Aton não filtra por lote, e pedidos agendados antigos podem entrar num lote novo. Por isso o
+// sistema guarda, na planilha, os itens dos pedidos que já estão em algum lote nos últimos
+// AMBER_DIAS_INDICE dias. O botão "Atualizar índice" reconstrói isso em etapas (cada etapa cabe nos 6 min
+// do Apps Script). Um lote não muda depois de gerado, então o lançamento só lê a planilha (instantâneo).
+//
+// Regra de confiança: o índice lê primeiro os dias mais recentes e anota o maior número de lote visto
+// (m0). Todo lote com número <= m0 já existia quando a atualização começou, então foi lido completo.
+// Lotes acima de m0 (criados durante a atualização) pedem uma nova atualização.
+// =====================================================================
+function lerMeta_() {
+  const t = PropertiesService.getScriptProperties().getProperty('INDICE_META');
+  return t ? JSON.parse(t) : null;
+}
+function gravarMeta_(meta) {
+  PropertiesService.getScriptProperties().setProperty('INDICE_META', JSON.stringify(meta));
 }
 
-function lerIndiceCache_(chave) {
+function indiceDias_() {                      // do dia de hoje para trás (mais recente primeiro)
+  const hoje = parseData_(hoje_());
+  const dias = [];
+  for (let i = 0; i <= CONFIG.AMBER_DIAS_INDICE; i++) dias.push(fmtData_(somarDias_(hoje, -i)));
+  return dias;
+}
+
+function indiceStatus() {
+  const meta = lerMeta_();
+  const sh = aba_(ABAS.INDICE);
+  const linhas = Math.max(0, sh.getLastRow() - 1);
+  if (!meta) return { existe: false, emAndamento: false, linhas: linhas };
+  const total = meta.feitos.length + meta.pendentes.length;
+  return {
+    existe: true,
+    emAndamento: !meta.concluidoEm,
+    concluidoEm: meta.concluidoEm || '',
+    iniciadoEm: meta.iniciadoEm,
+    m0: meta.m0,
+    feitos: meta.feitos.length,
+    total: total,
+    linhas: linhas
+  };
+}
+
+function indiceIniciar() {
+  if (CONFIG.MODO_TESTE) throw new Error('O MODO_TESTE está ligado: não há índice do Amber para atualizar. Desligue o MODO_TESTE no Code.gs.');
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Outra atualização do índice está em andamento. Aguarde.');
   try {
-    const cache = CacheService.getScriptCache();
-    const n = Number(cache.get(chave + ':n'));
-    if (!n) return null;
-    const partes = [];
-    for (let i = 0; i < n; i++) {
-      const parte = cache.get(chave + ':' + i);
-      if (parte == null) return null;
-      partes.push(parte);
+    const meta = lerMeta_();
+    if (meta && !meta.concluidoEm && Date.now() - new Date(meta.ultimaEtapaEm || meta.iniciadoEm).getTime() < 600000) {
+      return indiceStatus();                  // já em andamento (outra aba do navegador): continua dela
     }
-    return JSON.parse(partes.join(''));
-  } catch (e) {
-    return null;
+    gravarMeta_({
+      iniciadoEm: agoraTxt_(), ultimaEtapaEm: new Date().toISOString(), concluidoEm: '',
+      m0: 0, feitos: [], pendentes: indiceDias_()
+    });
+    return indiceStatus();
+  } finally {
+    lock.releaseLock();
   }
 }
 
-function gravarIndiceCache_(chave, indice) {
+/** Processa dias pendentes até esgotar o orçamento de tempo (uma etapa). O front-end chama até concluir. */
+function indiceEtapa() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('Outra atualização do índice está em andamento. Aguarde.');
   try {
-    const txt = JSON.stringify(indice);
-    const TAM = 90000, n = Math.ceil(txt.length / TAM);
-    if (n > 9) return;                                   // grande demais para o cache: segue sem ele
-    const itens = {};
-    for (let i = 0; i < n; i++) itens[chave + ':' + i] = txt.slice(i * TAM, (i + 1) * TAM);
-    itens[chave + ':n'] = String(n);
-    CacheService.getScriptCache().putAll(itens, CONFIG.AMBER_CACHE_SEGUNDOS);
-  } catch (e) {
-    Logger.log('Cache não gravado: ' + e.message);
+    const meta = lerMeta_();
+    if (!meta || meta.concluidoEm) return indiceStatus();
+    const sh = aba_(ABAS.INDICE);
+    const inicio = Date.now();
+    const ultima = sh.getLastRow();
+    let linhas = ultima < 2 ? [] : sh.getRange(2, 1, ultima - 1, ABAS.INDICE.cab.length).getValues();
+    const limiteJanela = meta.pendentes.concat(meta.feitos.map(function (f) { return f.dia; })).sort()[0];
+    linhas = linhas.filter(function (r) { return txtData_(r[1]) >= limiteJanela; });   // descarta o que saiu da janela
+
+    try {
+      let feitosNaEtapa = 0;
+      while (meta.pendentes.length && (feitosNaEtapa === 0 || Date.now() - inicio < CONFIG.AMBER_ORCAMENTO_SEG * 1000)) {
+        feitosNaEtapa++;
+        const dia = meta.pendentes[0];
+        const busca = buscarPedidosPeriodo_(dia, dia);
+        const doDia = [];
+        busca.pedidos.forEach(function (p) {
+          const lote = Number(p.lotesep);
+          if (!(lote > 0)) return;
+          if (meta.feitos.length < 2) meta.m0 = Math.max(meta.m0, lote);     // 2 dias mais recentes definem m0
+          (p.itens || []).forEach(function (i) {
+            const sku = String(i.codigo_interno == null ? '' : i.codigo_interno).trim();
+            const qtd = Number(i.quantidade);
+            if (!sku || !(qtd > 0)) return;
+            doDia.push([p.pedido, dia, lote, sku, qtd, i.codigo_aton, p.posicao]);
+          });
+        });
+        linhas = linhas.filter(function (r) { return txtData_(r[1]) !== dia; }).concat(doDia);
+        meta.feitos.push({ dia: dia, em: agoraTxt_(), pedidos: busca.pedidos.length });
+        meta.pendentes.shift();
+        meta.ultimaEtapaEm = new Date().toISOString();
+      }
+    } finally {
+      // grava o que foi feito (mesmo se uma consulta falhou no meio) para a próxima etapa continuar
+      sh.getRange(2, 1, Math.max(sh.getMaxRows() - 1, 1), ABAS.INDICE.cab.length).clearContent();
+      if (linhas.length) {
+        if (sh.getMaxRows() < linhas.length + 1) sh.insertRowsAfter(sh.getMaxRows(), linhas.length + 1 - sh.getMaxRows());
+        sh.getRange(2, 1, linhas.length, ABAS.INDICE.cab.length).setValues(linhas);
+      }
+      if (!meta.pendentes.length) meta.concluidoEm = agoraTxt_();
+      gravarMeta_(meta);
+      SpreadsheetApp.flush();
+    }
+    return indiceStatus();
+  } finally {
+    lock.releaseLock();
   }
 }
+
+function itensDoLoteIndice_(lote, forcar) {
+  const meta = lerMeta_();
+  const dica = ' Clique em "Atualizar índice" (aba Lançar) e tente de novo.';
+  if (!meta || !meta.feitos.length) {
+    throw new Error('LOTE_SEM_INDICE: O índice de lotes do Amber ainda não foi criado.' + dica);
+  }
+  if (!meta.concluidoEm) {
+    throw new Error('LOTE_SEM_INDICE: A atualização do índice não terminou.' + dica);
+  }
+  const sh = aba_(ABAS.INDICE);
+  const ultima = sh.getLastRow();
+  const linhas = ultima < 2 ? [] : sh.getRange(2, 1, ultima - 1, ABAS.INDICE.cab.length).getValues()
+    .filter(function (r) { return Number(r[2]) === lote; });
+  if (!linhas.length) {
+    throw new Error('LOTE_NAO_ENCONTRADO: O lote ' + lote + ' não está no índice (atualizado em ' + meta.concluidoEm +
+      ', lotes até ' + meta.m0 + '). Se ele foi gerado depois disso, atualize o índice. Se foi antes, confira o número do lote.');
+  }
+  if (lote > meta.m0 && !forcar) {
+    throw new Error('LOTE_NAO_CONFIRMADO: O lote ' + lote + ' foi encontrado, mas pode ter sido gerado durante a atualização do índice ' +
+      '(lotes confirmados até ' + meta.m0 + ') e estar incompleto. Atualize o índice. Se o lote só tem pedidos antigos e você ' +
+      'já conferiu os itens no Amber, pode lançar mesmo assim.');
+  }
+  return agruparPorSku_(linhas.map(function (r) {
+    return { sku: String(r[3]).trim(), descricao: '', qtd: Number(r[4]) || 0, codigoAton: r[5] };
+  })).map(function (i) { return { sku: i.sku, descricao: '', qtd: i.qtd, codigoAton: i.codigoAton }; });
+}
+
+function agoraTxt_() { return Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd HH:mm'); }
 
 /**
  * MAPEAMENTO ISOLADO: pedidos do Amber -> [{sku, descricao, qtd, codigoAton}] só do lote pedido.
@@ -424,10 +526,13 @@ function mapearItensAmber_(pedidos, lote) {
 
 /** Busca os pedidos do período em todas as posições configuradas (paginado, em paralelo). */
 function buscarPedidosAmber_(data) {
+  return buscarPedidosPeriodo_(fmtData_(somarDias_(parseData_(data), -CONFIG.AMBER_DIAS_ANTES)), data);
+}
+
+/** Busca os pedidos de um período (yyyy-MM-dd a yyyy-MM-dd) em todas as posições configuradas. */
+function buscarPedidosPeriodo_(isoIni, isoFim) {
   const inicio = Date.now();
-  const fim = parseData_(data);
-  const ini = somarDias_(fim, -CONFIG.AMBER_DIAS_ANTES);
-  const brIni = brData_(fmtData_(ini)), brFim = brData_(fmtData_(fim));
+  const brIni = brData_(isoIni), brFim = brData_(isoFim);
   const limite = CONFIG.AMBER_PAGINA;
   const mapa = {};
   const stats = { porPosicao: {}, modoOffset: CONFIG.AMBER_OFFSET_MODO, chamadas: 0, amostra: null };
@@ -722,7 +827,7 @@ function validarLancamento_(dados) {
   if (duracao < 0) duracao += 1440;           // virou a meia-noite
 
   return {
-    data: data, lote: lote, separador: separador,
+    data: data, lote: lote, separador: separador, forcar: dados.forcar === true,
     inicio: pad2_(Math.floor(mi / 60)) + ':' + pad2_(mi % 60),
     termino: pad2_(Math.floor(mt / 60)) + ':' + pad2_(mt % 60),
     duracao: duracao
