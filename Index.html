@@ -273,6 +273,10 @@ $('btnIndice').addEventListener('click', async () => {
   }
 });
 
+function dadosForm() {
+  return { data: $('data').value, lote: $('lote').value, separador: $('sep').value, inicio: $('ini').value, termino: $('fim').value };
+}
+
 $('form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const btn = $('btnSalvar'); btn.disabled = true; btn.textContent = 'Consultando o Amber e salvando…'; msg('msgLancar', '', '');
