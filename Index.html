@@ -56,6 +56,8 @@
   table { border-collapse:collapse; width:100%; font-size:14px; white-space:nowrap; }
   th, td { padding:8px 10px; text-align:right; border-bottom:1px solid var(--line); }
   th:nth-child(2), td:nth-child(2) { text-align:left; } th { color:var(--mut); font-size:12px; text-transform:uppercase; }
+  table.lanc th:first-child, table.lanc td:first-child { text-align:left; } table.lanc th, table.lanc td { padding:8px 6px; white-space:normal; } table.lanc th:nth-child(2), table.lanc td:nth-child(2) { text-align:right; } table.lanc small { color:var(--mut); }
+  table.lanc tbody tr:first-child td:first-child { font-weight:400; color:inherit; }
   tbody tr:first-child td:first-child { font-weight:700; color:var(--pri); }
   .charts { display:grid; gap:16px; }
   @media (min-width:900px) { .charts.two { grid-template-columns:1fr 1fr; } }
@@ -110,7 +112,9 @@
       <div class="hint" style="margin-top:10px">Os lançamentos ficam aguardando os itens. Faça esta atualização <b>uma vez ao dia</b> (fim da tarde), depois de gerar todos os lotes. Leva alguns minutos; deixe a página aberta.</div>
     </div>
     <div class="card">
-      <h2>Últimos lançamentos</h2>
+      <h2>Lançamentos</h2>
+      <div class="bar" style="margin-bottom:8px"><div class="f"><label for="filtroData">Data</label><input type="date" id="filtroData"></div></div>
+      <div id="msgLista"></div>
       <div class="wrap"><table id="tbUltimos"></table></div>
     </div>
   </section>
@@ -186,15 +190,47 @@ function atualizarDuracao() {
 $('ini').addEventListener('input', atualizarDuracao); $('fim').addEventListener('input', atualizarDuracao);
 
 function tabelaUltimos(l) {
+  $('tbUltimos').classList.add('lanc');
   $('tbUltimos').innerHTML = l.length
-    ? '<thead><tr><th>Data</th><th>Lote</th><th>Separador</th><th>Início</th><th>Término</th><th>Min</th><th>Itens</th></tr></thead><tbody>' +
-      l.map((r) => `<tr><td>${brData(r.data)}</td><td>${esc(r.lote)}</td><td style="text-align:left">${esc(r.separador)}</td><td>${esc(r.inicio)}</td><td>${esc(r.termino)}</td><td>${r.duracao}</td><td>${r.aguardando ? '<span title="Aguardando a atualização dos itens">⏳</span>' : nf(r.itens, 0)}</td></tr>`).join('') + '</tbody>'
-    : '<tbody><tr><td class="empty" style="text-align:center">Nenhum lançamento ainda.</td></tr></tbody>';
+    ? '<thead><tr><th>Lote / separador</th><th>Horário</th><th>Itens</th><th></th></tr></thead><tbody>' +
+      l.map((r) => `<tr><td><b>${esc(r.lote)}</b><br><small>${esc(r.separador)}</small></td>` +
+        `<td>${esc(r.inicio)}–${esc(r.termino)}<br><small>${r.duracao} min</small></td>` +
+        `<td>${r.aguardando ? '<span title="Aguardando a atualização dos itens">⏳</span>' : nf(r.itens, 0)}</td>` +
+        `<td><button class="btn sec btn-del" type="button" data-id="${esc(r.id)}" data-lote="${esc(r.lote)}" data-itens="${r.itens}" title="Excluir lançamento">🗑</button></td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="empty" style="text-align:center">Nenhum lançamento nesta data.</td></tr></tbody>';
 }
 
-function dadosForm() {
-  return { data: $('data').value, lote: $('lote').value, separador: $('sep').value, inicio: $('ini').value, termino: $('fim').value };
+async function carregarLancamentos() {
+  const d = $('filtroData').value;
+  if (!d) return;
+  try { tabelaUltimos(await run('listarLancamentos', d)); msg('msgLista', '', ''); }
+  catch (e) { msg('msgLista', 'err', '❌ ' + esc(erroTxt(e))); }
 }
+$('filtroData').addEventListener('change', carregarLancamentos);
+
+// exclusão em dois cliques (sem janela de confirmação do navegador)
+$('tbUltimos').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button'); if (!b) return;
+  if (b.classList.contains('btn-cancel')) { carregarLancamentos(); return; }
+  if (b.classList.contains('btn-del')) {
+    const n = +b.dataset.itens;
+    b.parentElement.innerHTML = `<div style="white-space:normal;min-width:150px"><small>Excluir o lote <b>${esc(b.dataset.lote)}</b>${n ? ` e seus ${nf(n, 0)} itens` : ''}?</small><br>` +
+      `<button class="btn btn-ok" type="button" style="background:var(--dif);padding:8px 12px" data-id="${esc(b.dataset.id)}">Excluir</button> ` +
+      `<button class="btn sec btn-cancel" type="button" style="padding:8px 12px">Cancelar</button></div>`;
+    return;
+  }
+  if (b.classList.contains('btn-ok')) {
+    b.disabled = true; b.textContent = 'Excluindo…';
+    try {
+      const r = await run('excluirLancamento', b.dataset.id);
+      setPendentes(r.pendentes); mostrarIndice(r.indice);
+      msg('msgLista', 'ok', `🗑 Lançamento do lote ${esc(r.lote)} excluído${r.itensRemovidos ? ` (${r.itensRemovidos} linhas de itens removidas)` : ''}. O lote pode ser lançado de novo.`);
+      tabelaUltimos(await run('listarLancamentos', $('filtroData').value));
+    } catch (e) {
+      msg('msgLista', 'err', '❌ ' + esc(erroTxt(e))); carregarLancamentos();
+    }
+  }
+});
 
 // ---------- itens dos lotes (índice do Amber) ----------
 function mostrarIndice(s) {
@@ -225,10 +261,10 @@ $('btnIndice').addEventListener('click', async () => {
     let h = `✅ ${r.preenchidos} lançamento(s) preenchido(s) com ${nf(r.totalItens, 0)} itens.`;
     if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) — classifique a dificuldade na aba Produtos.`;
     let tipo = 'ok';
-    if (r.naoEncontrados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) não encontrado(s) no Amber: <b>${r.naoEncontrados.map(esc).join(', ')}</b>. Confira o número digitado (ou se o lote é mais antigo que 30 dias). Corrija ou apague o lançamento na planilha (aba Registros).`; }
+    if (r.naoEncontrados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) não encontrado(s) no Amber: <b>${r.naoEncontrados.map(esc).join(', ')}</b>. Confira o número digitado (ou se o lote é mais antigo que 30 dias). Exclua o lançamento (🗑 na lista abaixo) e lance de novo com o número certo.`; }
     if (r.naoConfirmados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) gerado(s) durante a leitura: <b>${r.naoConfirmados.map(esc).join(', ')}</b>. Clique em "Atualizar itens do dia" de novo.`; }
     msg('msgIndice', tipo, h);
-    run('getInitData').then((d) => tabelaUltimos(d.ultimos)).catch(() => {});
+    carregarLancamentos();
   } catch (e) {
     msg('msgIndice', 'err', '❌ ' + esc(erroTxt(e)) + '<br>Clique em "Atualizar itens do dia" para continuar de onde parou.');
     run('getInitData').then((d) => mostrarIndice(d.indice)).catch(() => {});
@@ -247,7 +283,7 @@ $('form').addEventListener('submit', async (ev) => {
     else h += ` ${nf(r.totalItens, 0)} itens em ${r.skus} SKUs.`;
     if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) cadastrado(s) — falta classificar a dificuldade na aba Produtos.`;
     msg('msgLancar', 'ok', h);
-    tabelaUltimos(r.ultimos); setPendentes(r.pendentes); mostrarIndice(r.indice);
+    $('filtroData').value = $('data').value; tabelaUltimos(r.ultimos); setPendentes(r.pendentes); mostrarIndice(r.indice);
     $('ini').value = $('fim').value; $('fim').value = ''; $('lote').value = ''; atualizarDuracao(); $('lote').focus();
   } catch (e) {
     msg('msgLancar', 'err', '❌ ' + esc(erroTxt(e)));
@@ -383,7 +419,7 @@ $('listaProd').addEventListener('click', async (ev) => {
       ? '<option value="">Selecione…</option>' + d.separadores.map((s) => `<option>${esc(s)}</option>`).join('')
       : '<option value="">Cadastre os separadores na aba Colaboradores</option>';
     $('modoTeste').hidden = !d.modoTeste;
-    setPendentes(d.pendentes); tabelaUltimos(d.ultimos); mostrarIndice(d.indice);
+    $('filtroData').value = d.hoje; setPendentes(d.pendentes); tabelaUltimos(d.ultimos); mostrarIndice(d.indice);
     $('cardIndice').hidden = !!d.modoTeste;
   } catch (e) {
     msg('msgLancar', 'err', '❌ ' + esc(erroTxt(e)));

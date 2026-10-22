@@ -66,7 +66,7 @@ Apague a linha de exemplo.
 4. Só depois disso o painel tem os itens e pontos desses lotes (até lá ele avisa quais lotes ainda estão sem itens).
 5. Lançamentos feitos depois da atualização ficam pendentes até a atualização do dia seguinte (que também preenche pendências antigas).
 
-**Resultado da atualização:** o app informa quantos lançamentos foram preenchidos e lista (a) **lotes não encontrados** no Amber, geralmente número digitado errado: corrija ou apague o lançamento na planilha (aba Registros) e lance de novo; (b) **lotes gerados durante a leitura**: clique em "Atualizar itens do dia" de novo. Não gere lotes nem mexa em pedidos enquanto a atualização roda.
+**Resultado da atualização:** o app informa quantos lançamentos foram preenchidos e lista (a) **lotes não encontrados** no Amber, geralmente número digitado errado: exclua o lançamento (🗑 na lista) e lance de novo; (b) **lotes gerados durante a leitura**: clique em "Atualizar itens do dia" de novo. Não gere lotes nem mexa em pedidos enquanto a atualização roda.
 
 **Regra de segurança:** a atualização lê primeiro os dias mais recentes e anota o maior número de lote visto, e no fim relê o dia mais recente. Se nenhum lote novo surgiu nesse intervalo, todos os lotes lidos são confirmados. Se surgiu, só valem os lotes até o maior número visto no início; os demais ficam pendentes até a próxima atualização.
 
@@ -97,12 +97,12 @@ Pelo clasp: `npx clasp deploy`. O acesso vem do `appsscript.json` (padrão `MYSE
 - **Duração:** término − início em minutos. Se o término for menor, considera virada da meia-noite. Término igual ao início é recusado.
 - **Dificuldade:** SKU inédito entra em **Produtos** com dificuldade em branco (pendente). O peso é lido da planilha na hora de gerar o painel, então classificar um produto vale também para lotes antigos. Pendente = peso 1, com aviso no painel.
 - **Painel:** Pontos = quantidade × dificuldade. Pontos/hora da equipe = pontos totais ÷ horas totais trabalhadas. Semana = segunda a domingo. O ranking é ordenado por pontos/hora. Itens sem classificação aparecem em "Simples" até serem classificados.
-- **Corrigir um lançamento errado:** apague a linha do lote em **Registros** e as linhas com o mesmo `ID_Registro` em **Itens_Lote**. Depois lance de novo.
+- **Excluir um lançamento:** na aba **Lançar**, em **Lançamentos**, escolha a data e clique em 🗑 no lançamento. O app pede uma confirmação e remove o registro e os itens dele; o lote fica livre para ser lançado de novo. Se excluir por engano, use o histórico de versões do Google Sheets (Arquivo → Histórico de versões).
 
 ## Limites e pontos de atenção
 
 - **Janela do índice:** só cobre `AMBER_DIAS_INDICE` dias (30). Pedidos mais antigos que isso, dentro de um lote, não entram. Aumente o valor se precisar (a atualização fica mais longa).
-- **Lote digitado errado:** só é descoberto na atualização dos itens (lote não encontrado). Corrija na planilha.
+- **Lote digitado errado:** só é descoberto na atualização dos itens (lote não encontrado). Exclua o lançamento (🗑) e lance de novo.
 - **Lote 0 / com letras:** no Amber `lotesep = 0` significa "sem lote". Com o Amber ligado, o app só aceita lotes numéricos maiores que zero (no `MODO_TESTE` aceita qualquer um).
 - **Carga no Amber:** cada atualização completa faz centenas de consultas (leitura). Faça quando precisar, não de hora em hora. Cada consulta tem até 3 tentativas para erros temporários do servidor.
 - **Cota do Google:** cada atualização completa consome parte do limite diário de consultas externas e de tempo de execução do Apps Script; confira os limites atuais da sua conta (Gmail ou Workspace) na documentação do Google.

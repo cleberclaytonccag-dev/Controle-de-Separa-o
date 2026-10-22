@@ -152,7 +152,7 @@ function getInitData() {
     modoTeste: CONFIG.MODO_TESTE,
     separadores: listarSeparadores_(),
     pendentes: contarPendentes_(),
-    ultimos: ultimosRegistros_(12)
+    ultimos: listarLancamentos(hoje_())
   };
 }
 
@@ -209,7 +209,7 @@ function salvarLancamento(dados) {
       skus: itens ? itens.length : 0,
       novosProdutos: novos,
       pendentes: contarPendentes_(),
-      ultimos: ultimosRegistros_(12),
+      ultimos: listarLancamentos(d.data),
       indice: statusIndiceSeguro_()
     };
   } finally {
@@ -980,18 +980,63 @@ function separadorDoLote_(lote) {
   return '';
 }
 
-function ultimosRegistros_(n) {
+/** Lançamentos de uma data (mais recentes primeiro), para a lista da tela Lançar. */
+function listarLancamentos(data) {
+  if (!dataValida_(data)) throw new Error('Informe uma data válida.');
   const sh = aba_(ABAS.REGISTROS);
   const last = sh.getLastRow();
   if (last < 2) return [];
-  const ini = Math.max(2, last - n + 1);
-  return sh.getRange(ini, 1, last - ini + 1, 9).getValues().reverse().map(function (r) {
-    return {
-      data: txtData_(r[1]), lote: String(r[2]), separador: String(r[3]),
-      inicio: txtHora_(r[4]), termino: txtHora_(r[5]),
-      duracao: Number(r[6]) || 0, itens: Number(r[7]) || 0, aguardando: String(r[7]) === ''
-    };
-  });
+  return sh.getRange(2, 1, last - 1, 9).getValues()
+    .filter(function (r) { return txtData_(r[1]) === data; })
+    .reverse()
+    .map(function (r) {
+      return {
+        id: String(r[0]), data: txtData_(r[1]), lote: String(r[2]), separador: String(r[3]),
+        inicio: txtHora_(r[4]), termino: txtHora_(r[5]),
+        duracao: Number(r[6]) || 0, itens: Number(r[7]) || 0, aguardando: String(r[7]) === ''
+      };
+    });
+}
+
+/** Exclui um lançamento (registro + itens). O lote fica livre para ser lançado de novo. */
+function excluirLancamento(id) {
+  id = String(id || '').trim();
+  if (!id) throw new Error('Lançamento não informado.');
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('O sistema está ocupado. Tente novamente em alguns segundos.');
+  try {
+    const shReg = aba_(ABAS.REGISTROS), shIt = aba_(ABAS.ITENS);
+    const ultReg = shReg.getLastRow();
+    const ids = ultReg < 2 ? [] : shReg.getRange(2, 1, ultReg - 1, 3).getValues();
+    let linhaReg = -1, lote = '';
+    for (let i = 0; i < ids.length; i++) {
+      if (String(ids[i][0]).trim() === id) { linhaReg = i + 2; lote = String(ids[i][2]); break; }
+    }
+    if (linhaReg < 0) throw new Error('Lançamento não encontrado (talvez já tenha sido excluído).');
+
+    // 1) marca como "aguardando itens"; 2) apaga os itens (de baixo para cima, em blocos); 3) apaga o registro.
+    // Se algo falhar no meio, sobra um lançamento "aguardando", que a atualização do dia consegue refazer.
+    shReg.getRange(linhaReg, 8).setValue('');
+    const ultIt = shIt.getLastRow();
+    let removidos = 0;
+    if (ultIt >= 2) {
+      const col = shIt.getRange(2, 1, ultIt - 1, 1).getValues();
+      const linhas = [];
+      col.forEach(function (r, i) { if (String(r[0]).trim() === id) linhas.push(i + 2); });
+      for (let k = linhas.length - 1; k >= 0; ) {
+        let ini = k;
+        while (ini > 0 && linhas[ini - 1] === linhas[ini] - 1) ini--;
+        shIt.deleteRows(linhas[ini], k - ini + 1);
+        removidos += k - ini + 1;
+        k = ini - 1;
+      }
+    }
+    shReg.deleteRows(linhaReg, 1);
+    SpreadsheetApp.flush();
+    return { lote: lote, itensRemovidos: removidos, pendentes: contarPendentes_(), indice: statusIndiceSeguro_() };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 /** Lê só o bloco de linhas cujo campo Data (coluna B) cai no período. */
