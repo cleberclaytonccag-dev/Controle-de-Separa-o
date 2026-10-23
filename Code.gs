@@ -266,14 +266,18 @@ function getPainel(periodo, ref) {
 
   const colab = {};
   function obter(nome) {
-    if (!colab[nome]) colab[nome] = { nome: nome, lotes: 0, min: 0, itens: 0, s: 0, m: 0, d: 0, pontos: 0, diario: {} };
+    if (!colab[nome]) colab[nome] = { nome: nome, lotes: 0, semHor: 0, min: 0, itens: 0, itensT: 0, s: 0, m: 0, d: 0, pontos: 0, pontosT: 0, diario: {} };
     return colab[nome];
   }
 
+  // Lotes sem horário contam em itens e pontos, mas ficam FORA de horas, itens/h e pontos/h
+  // (senão a produtividade por hora ficaria inflada).
+  const comHorario = {};
   regs.forEach(function (r) {
     const c = obter(String(r[3]));
     c.lotes += 1;
-    c.min += Number(r[6]) || 0;
+    const min = Number(r[6]) || 0;
+    if (min > 0) { c.min += min; comHorario[String(r[0])] = true; } else { c.semHor += 1; }
   });
 
   const semItens = regs.filter(function (r) { return String(r[7]) === ''; }).map(function (r) { return String(r[2]); });
@@ -291,6 +295,7 @@ function getPainel(periodo, ref) {
     c.itens += qtd;
     if (peso === 1) c.s += qtd; else if (peso === 2) c.m += qtd; else c.d += qtd;
     c.pontos += qtd * peso;
+    if (comHorario[String(r[0])]) { c.itensT += qtd; c.pontosT += qtd * peso; }
     const dia = txtData_(r[1]);
     c.diario[dia] = (c.diario[dia] || 0) + qtd * peso;
   });
@@ -304,16 +309,18 @@ function getPainel(periodo, ref) {
       simples: r2(c.s), medios: r2(c.m), dificeis: r2(c.d),
       difMedia: c.itens ? r2(c.pontos / c.itens) : 0,
       pontos: r2(c.pontos),
-      itensHora: horas ? r2(c.itens / horas) : 0,
-      pontosHora: horas ? r2(c.pontos / horas) : 0,
+      itensHora: horas ? r2(c.itensT / horas) : 0,
+      pontosHora: horas ? r2(c.pontosT / horas) : 0,
+      semHorario: c.semHor, itensT: c.itensT, pontosT: c.pontosT,
       diario: c.diario
     };
   }).sort(function (a, b) { return b.pontosHora - a.pontosHora || b.pontos - a.pontos; });
 
   const tot = ranking.reduce(function (t, c) {
     t.lotes += c.lotes; t.horas += c.horas; t.itens += c.itens; t.pontos += c.pontos;
+    t.itensT += c.itensT; t.pontosT += c.pontosT; t.semHorario += c.semHorario;
     return t;
-  }, { lotes: 0, horas: 0, itens: 0, pontos: 0 });
+  }, { lotes: 0, horas: 0, itens: 0, pontos: 0, itensT: 0, pontosT: 0, semHorario: 0 });
 
   const listaPend = Object.keys(pendentes).map(function (k) { return pendentes[k]; })
     .sort(function (a, b) { return b.qtd - a.qtd; });
@@ -327,14 +334,15 @@ function getPainel(periodo, ref) {
       horas: r2(tot.horas),
       itens: r2(tot.itens),
       pontos: r2(tot.pontos),
-      pontosHora: tot.horas ? r2(tot.pontos / tot.horas) : 0,   // pontos totais / horas totais trabalhadas
-      itensHora: tot.horas ? r2(tot.itens / tot.horas) : 0
+      pontosHora: tot.horas ? r2(tot.pontosT / tot.horas) : 0,   // pontos dos lotes com horário / horas trabalhadas
+      itensHora: tot.horas ? r2(tot.itensT / tot.horas) : 0,
+      lotesSemHorario: tot.semHorario
     },
     ranking: ranking.map(function (c) {
       return {
         nome: c.nome, lotes: c.lotes, horas: c.horas, itens: c.itens, simples: c.simples,
         medios: c.medios, dificeis: c.dificeis, difMedia: c.difMedia, pontos: c.pontos,
-        itensHora: c.itensHora, pontosHora: c.pontosHora,
+        itensHora: c.itensHora, pontosHora: c.pontosHora, semHorario: c.semHorario,
         serie: faixa.dias.map(function (d) { return r2(c.diario[d] || 0); })
       };
     }),
@@ -879,6 +887,12 @@ function validarLancamento_(dados) {
   if (listarSeparadores_().indexOf(separador) < 0) {
     throw new Error('O separador "' + separador + '" não está ativo na aba Colaboradores.');
   }
+  if (!inicio && !termino) {                  // lote sem medição de tempo
+    return { data: data, lote: lote, separador: separador, inicio: '', termino: '', duracao: '' };
+  }
+  if (!inicio || !termino) {
+    throw new Error('Informe o horário de início e o de término, ou deixe os dois em branco (lote sem medição de tempo).');
+  }
   const mi = minutos_(inicio);
   const mt = minutos_(termino);
   if (isNaN(mi)) throw new Error('Horário de início inválido.');
@@ -993,7 +1007,8 @@ function listarLancamentos(data) {
       return {
         id: String(r[0]), data: txtData_(r[1]), lote: String(r[2]), separador: String(r[3]),
         inicio: txtHora_(r[4]), termino: txtHora_(r[5]),
-        duracao: Number(r[6]) || 0, itens: Number(r[7]) || 0, aguardando: String(r[7]) === ''
+        duracao: Number(r[6]) || 0, semHorario: !(Number(r[6]) > 0),
+        itens: Number(r[7]) || 0, aguardando: String(r[7]) === ''
       };
     });
 }

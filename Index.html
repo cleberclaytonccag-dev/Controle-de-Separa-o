@@ -95,10 +95,10 @@
           <div><label for="data">Data</label><input type="date" id="data" required></div>
           <div><label for="lote">Número do lote</label><input type="text" id="lote" inputmode="numeric" required></div>
           <div class="full"><label for="sep">Separador</label><select id="sep" required></select></div>
-          <div><label for="ini">Início</label><input type="time" id="ini" required></div>
-          <div><label for="fim">Término</label><input type="time" id="fim" required></div>
+          <div><label for="ini">Início</label><input type="time" id="ini"></div>
+          <div><label for="fim">Término</label><input type="time" id="fim"></div>
         </div>
-        <div class="hint" id="dur">Duração: —</div>
+        <div class="hint" id="dur">Deixe início e término em branco se não for medir o tempo deste lote.</div>
         <div style="margin-top:14px"><button class="btn" id="btnSalvar" type="submit">Salvar lançamento</button></div>
       </form>
       <div id="msgLancar"></div>
@@ -182,7 +182,8 @@ function setPendentes(n) {
 // ---------- lançar ----------
 function atualizarDuracao() {
   const a = $('ini').value, b = $('fim').value;
-  if (!a || !b) { $('dur').textContent = 'Duração: —'; return; }
+  if (!a && !b) { $('dur').textContent = 'Sem horário: o lote conta em itens e pontos, mas não entra nas horas nem na produtividade por hora.'; return; }
+  if (!a || !b) { $('dur').textContent = 'Preencha o início e o término, ou deixe os dois em branco.'; return; }
   const m = (t) => +t.slice(0, 2) * 60 + +t.slice(3, 5);
   let d = m(b) - m(a); if (d < 0) d += 1440;
   $('dur').textContent = d === 0 ? 'Término igual ao início — confira.' : `Duração: ${d} min (${hhmm(d / 60)})${m(b) < m(a) ? ' — passou da meia-noite' : ''}`;
@@ -194,7 +195,7 @@ function tabelaUltimos(l) {
   $('tbUltimos').innerHTML = l.length
     ? '<thead><tr><th>Lote / separador</th><th>Horário</th><th>Itens</th><th></th></tr></thead><tbody>' +
       l.map((r) => `<tr><td><b>${esc(r.lote)}</b><br><small>${esc(r.separador)}</small></td>` +
-        `<td>${esc(r.inicio)}–${esc(r.termino)}<br><small>${r.duracao} min</small></td>` +
+        `<td>${r.semHorario ? '<small>sem horário</small>' : `${esc(r.inicio)}–${esc(r.termino)}<br><small>${r.duracao} min</small>`}</td>` +
         `<td>${r.aguardando ? '<span title="Aguardando a atualização dos itens">⏳</span>' : nf(r.itens, 0)}</td>` +
         `<td><button class="btn sec btn-del" type="button" data-id="${esc(r.id)}" data-lote="${esc(r.lote)}" data-itens="${r.itens}" title="Excluir lançamento">🗑</button></td></tr>`).join('') + '</tbody>'
     : '<tbody><tr><td class="empty" style="text-align:center">Nenhum lançamento nesta data.</td></tr></tbody>';
@@ -282,7 +283,7 @@ $('form').addEventListener('submit', async (ev) => {
   const btn = $('btnSalvar'); btn.disabled = true; btn.textContent = 'Consultando o Amber e salvando…'; msg('msgLancar', '', '');
   try {
     const r = await run('salvarLancamento', dadosForm());
-    let h = `✅ Lote <b>${esc(r.lote)}</b> salvo para <b>${esc(r.separador)}</b>, duração ${r.duracao} min.`;
+    let h = `✅ Lote <b>${esc(r.lote)}</b> salvo para <b>${esc(r.separador)}</b>, ${r.duracao === '' ? 'sem horário' : 'duração ' + r.duracao + ' min'}.`;
     if (r.aguardandoItens) h += '<br>Os itens serão buscados na atualização do fim do dia.';
     else h += ` ${nf(r.totalItens, 0)} itens em ${r.skus} SKUs.`;
     if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) cadastrado(s) — falta classificar a dificuldade na aba Produtos.`;
@@ -336,6 +337,9 @@ async function carregarPainel() {
     if (p.lotesSemItens && p.lotesSemItens.length) {
       aviso += `<div class="msg warn" style="margin:0 0 16px">⏳ ${p.lotesSemItens.length} lote(s) do período ainda sem itens (${p.lotesSemItens.slice(0, 6).map(esc).join(', ')}${p.lotesSemItens.length > 6 ? '…' : ''}): os pontos ficam incompletos até a atualização dos itens (aba Lançar).</div>`;
     }
+    if (p.equipe.lotesSemHorario) {
+      aviso += `<div class="msg warn" style="margin:0 0 16px">🕒 ${p.equipe.lotesSemHorario} lote(s) sem horário: contam em itens e pontos, mas ficam fora das horas, de itens/h e de pontos/h.</div>`;
+    }
     if (p.pendentesTotal) {
       aviso += `<div class="msg warn" style="margin:0 0 16px">⚠️ ${p.pendentesTotal} produto(s) deste período ainda sem dificuldade (contados como peso 1): ` +
         p.pendentes.slice(0, 5).map((x) => esc(x.sku)).join(', ') + (p.pendentesTotal > 5 ? '…' : '') +
@@ -347,7 +351,7 @@ async function carregarPainel() {
     const r = p.ranking;
     $('tbRank').innerHTML = r.length
       ? '<thead><tr><th>#</th><th>Colaborador</th><th>Lotes</th><th>Horas</th><th>Itens</th><th>Simples</th><th>Médios</th><th>Difíceis</th><th>Dif. média</th><th>Pontos</th><th>Itens/h</th><th>Pontos/h</th></tr></thead><tbody>' +
-        r.map((c, i) => `<tr><td>${i + 1}</td><td>${esc(c.nome)}</td><td>${c.lotes}</td><td>${hhmm(c.horas)}</td><td>${nf(c.itens, 0)}</td><td>${nf(c.simples, 0)}</td><td>${nf(c.medios, 0)}</td><td>${nf(c.dificeis, 0)}</td><td>${nf(c.difMedia, 2)}</td><td>${nf(c.pontos, 0)}</td><td>${nf(c.itensHora, 1)}</td><td><b>${nf(c.pontosHora, 1)}</b></td></tr>`).join('') + '</tbody>'
+        r.map((c, i) => `<tr><td>${i + 1}</td><td>${esc(c.nome)}</td><td>${c.lotes}${c.semHorario ? ` <small title="Lotes sem horário: contam em itens e pontos, mas não nas horas e por hora">(${c.semHorario} s/ hor.)</small>` : ''}</td><td>${hhmm(c.horas)}</td><td>${nf(c.itens, 0)}</td><td>${nf(c.simples, 0)}</td><td>${nf(c.medios, 0)}</td><td>${nf(c.dificeis, 0)}</td><td>${nf(c.difMedia, 2)}</td><td>${nf(c.pontos, 0)}</td><td>${nf(c.itensHora, 1)}</td><td><b>${nf(c.pontosHora, 1)}</b></td></tr>`).join('') + '</tbody>'
       : '<tbody><tr><td class="empty" style="text-align:center">Sem lançamentos no período.</td></tr></tbody>';
 
     const nomes = r.map((c) => c.nome);

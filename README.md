@@ -61,7 +61,7 @@ Apague a linha de exemplo.
 
 **Rotina do dia:**
 1. Gere os lotes no Amber normalmente.
-2. Ao longo do dia, lance cada separação no app (aba **Lançar**): data, número do lote, separador, início e término. **Nada é consultado no Amber nesse momento**: o lançamento fica com o ícone ⏳ (aguardando itens).
+2. Ao longo do dia, lance cada separação no app (aba **Lançar**): data, número do lote, separador e, se for medir o tempo, início e término (opcionais). **Nada é consultado no Amber nesse momento**: o lançamento fica com o ícone ⏳ (aguardando itens).
 3. **Uma vez ao dia, no fim da tarde**, com todos os lotes já gerados, clique em **Atualizar itens do dia**. A barra de progresso mostra a leitura do Amber (alguns minutos; deixe a página aberta) e, no fim, os itens são gravados em todos os lançamentos pendentes. Se der erro ou você fechar a página, clique de novo: continua de onde parou.
 4. Só depois disso o painel tem os itens e pontos desses lotes (até lá ele avisa quais lotes ainda estão sem itens).
 5. Lançamentos feitos depois da atualização ficam pendentes até a atualização do dia seguinte (que também preenche pendências antigas).
@@ -95,6 +95,7 @@ Pelo clasp: `npx clasp deploy`. O acesso vem do `appsscript.json` (padrão `MYSE
 
 - **Lançamento:** valida os dados e grava o registro (aba Registros). Um lote só pode ser lançado uma vez, e o salvamento usa `LockService`. Os itens do lote (agrupados por SKU) são gravados na atualização do fim do dia; no `MODO_TESTE` são gravados na hora.
 - **Duração:** término − início em minutos. Se o término for menor, considera virada da meia-noite. Término igual ao início é recusado.
+- **Lote sem horário:** início e término são opcionais, mas é **os dois ou nenhum**. Um lote sem horário conta em lotes, itens e pontos, mas fica **fora** das horas, de itens/h e de pontos/h (para não inflar a produtividade). O painel mostra quantos lotes estão sem horário e, na lista, aparece "sem horário".
 - **Dificuldade:** SKU inédito entra em **Produtos** com dificuldade em branco (pendente). O peso é lido da planilha na hora de gerar o painel, então classificar um produto vale também para lotes antigos. Pendente = peso 1, com aviso no painel.
 - **Painel:** Pontos = quantidade × dificuldade. Pontos/hora da equipe = pontos totais ÷ horas totais trabalhadas. Semana = segunda a domingo. O ranking é ordenado por pontos/hora. Itens sem classificação aparecem em "Simples" até serem classificados.
 - **Excluir um lançamento:** na aba **Lançar**, em **Lançamentos**, escolha a data e clique em 🗑 no lançamento. O app pede uma confirmação e remove o registro e os itens dele; o lote fica livre para ser lançado de novo. Se excluir por engano, use o histórico de versões do Google Sheets (Arquivo → Histórico de versões).
