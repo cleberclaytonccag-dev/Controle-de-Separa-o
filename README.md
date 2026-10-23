@@ -66,6 +66,11 @@ Apague a linha de exemplo.
 4. Só depois disso o painel tem os itens e pontos desses lotes (até lá ele avisa quais lotes ainda estão sem itens).
 5. Lançamentos feitos depois da atualização ficam pendentes até a atualização do dia seguinte (que também preenche pendências antigas).
 
+**Atualizar em segundo plano:** o botão **Atualizar em segundo plano** faz a mesma atualização por gatilhos do Apps Script. Você pode fechar a página: o sistema lê o Amber em passos de ~3 minutos, tenta de novo se houver erro temporário (até 3 vezes) e, no fim, preenche os itens. Ao voltar ao app, o card mostra o resultado (ou o andamento, se ainda estiver rodando). **Cancelar** para a execução e mantém o progresso já lido; um novo clique continua de onde parou, no mesmo dia. Se ficar mais de 15 minutos sem atividade, o app avisa que parece travada.
+- **Primeira vez (autorização):** o segundo plano usa uma permissão nova (gerenciar gatilhos). Depois de colar o código novo, no editor escolha a função **`autorizarSegundoPlano`**, clique em **Executar** e autorize. Só então faça a nova versão da implantação.
+- **Limites do Google:** gatilhos têm cota diária de tempo de execução (menor em Gmail do que em Workspace). Uma atualização completa leva uns 13 minutos; faça poucas vezes ao dia. Confira os limites atuais na documentação do Google.
+- **Horários programados (futuro):** a rotina de segundo plano já está separada (`iniciarSegundoPlano_`), então um gatilho diário num horário fixo pode chamá-la sem mudar o resto.
+
 **Resultado da atualização:** o app informa quantos lançamentos foram preenchidos e lista (a) **lotes não encontrados** no Amber, geralmente número digitado errado: exclua o lançamento (🗑 na lista) e lance de novo; (b) **lotes gerados durante a leitura**: clique em "Atualizar itens do dia" de novo. Não gere lotes nem mexa em pedidos enquanto a atualização roda.
 
 **Regra de segurança:** a atualização lê primeiro os dias mais recentes e anota o maior número de lote visto, e no fim relê o dia mais recente. Se nenhum lote novo surgiu nesse intervalo, todos os lotes lidos são confirmados. Se surgiu, só valem os lotes até o maior número visto no início; os demais ficam pendentes até a próxima atualização.

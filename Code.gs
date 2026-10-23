@@ -411,8 +411,34 @@ function indiceStatus() {
     aguardando: contarSemItens_(),
     feitos: meta.feitos.length,
     total: total,
-    linhas: linhas
+    linhas: linhas,
+    segundoPlano: meta.bg ? {
+      ativo: !!meta.bg.ativo, travado: bgTravado_(meta), iniciadoEm: meta.bg.iniciadoEm, fimEm: meta.bg.fimEm || '',
+      erro: meta.bg.erro || '', resultado: meta.bg.resultado || null
+    } : null
   };
+}
+
+function novoMeta_(origem) {
+  return {
+    origem: origem || 'tela', iniciadoEm: agoraTxt_(), ultimaEtapaEm: new Date().toISOString(), concluidoEm: '',
+    m0: 0, estavel: false, confirmadoAte: 0, feitos: [], pendentes: indiceDias_().concat(['#fim'])
+  };
+}
+
+function retomavel_(meta) {                   // atualização incompleta, começada hoje: dá para continuar de onde parou
+  return !!(meta && !meta.concluidoEm && meta.pendentes && meta.pendentes.length && String(meta.iniciadoEm).slice(0, 10) === hoje_());
+}
+function naTelaAgora_(meta) {                 // atualização iniciada pela tela e com atividade nos últimos 10 min
+  return !!(meta && meta.origem === 'tela' && !meta.concluidoEm && Date.now() - new Date(meta.ultimaEtapaEm || 0).getTime() < 600000);
+}
+
+function bgAtivo_(meta) {                     // segundo plano em andamento e sem estar travado
+  return !!(meta && meta.bg && meta.bg.ativo && !bgTravado_(meta));
+}
+function bgTravado_(meta) {                   // ativo, mas sem nenhuma atividade há mais de 15 min
+  return !!(meta && meta.bg && meta.bg.ativo &&
+    Date.now() - new Date(meta.ultimaEtapaEm || 0).getTime() > 15 * 60000);
 }
 
 function indiceIniciar() {
@@ -421,16 +447,113 @@ function indiceIniciar() {
   if (!lock.tryLock(30000)) throw new Error('Outra atualização do índice está em andamento. Aguarde.');
   try {
     const meta = lerMeta_();
-    if (meta && !meta.concluidoEm && Date.now() - new Date(meta.ultimaEtapaEm || meta.iniciadoEm).getTime() < 600000) {
-      return indiceStatus();                  // já em andamento (outra aba do navegador): continua dela
-    }
-    gravarMeta_({
-      iniciadoEm: agoraTxt_(), ultimaEtapaEm: new Date().toISOString(), concluidoEm: '',
-      m0: 0, estavel: false, confirmadoAte: 0, feitos: [], pendentes: indiceDias_().concat(['#fim'])
-    });
+    if (bgAtivo_(meta)) throw new Error('Há uma atualização em segundo plano em andamento. Aguarde terminar ou cancele-a.');
+    if (retomavel_(meta)) return indiceStatus();      // continua de onde parou (tela, outra aba ou segundo plano parado)
+    gravarMeta_(novoMeta_('tela'));
     return indiceStatus();
   } finally {
     lock.releaseLock();
+  }
+}
+
+// =====================================================================
+// ATUALIZAÇÃO EM SEGUNDO PLANO (gatilhos de uso único encadeados)
+//
+// O botão "Em segundo plano" cria um gatilho que roda indiceSegundoPlanoPasso(): cada passo lê alguns dias
+// do Amber (como indiceEtapa), agenda o passo seguinte e, no fim, preenche os itens dos lançamentos.
+// Dá para fechar a página. Em caso de erro tenta de novo (até 3 vezes). Para agendar horários fixos no futuro,
+// basta um gatilho diário chamar iniciarSegundoPlano_().
+// =====================================================================
+function agendarPasso_(ms) {
+  ScriptApp.newTrigger('indiceSegundoPlanoPasso').timeBased().after(ms).create();
+}
+function removerGatilhos_() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'indiceSegundoPlanoPasso') ScriptApp.deleteTrigger(t);
+  });
+}
+
+/** Rode uma vez no editor depois de atualizar o código: pede a permissão para criar gatilhos. */
+function autorizarSegundoPlano() {
+  Logger.log('Permissão OK. Gatilhos do projeto: ' + ScriptApp.getProjectTriggers().length);
+}
+
+function iniciarSegundoPlano_() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('O sistema está ocupado. Tente novamente em alguns segundos.');
+  try {
+    const meta = lerMeta_();
+    if (bgAtivo_(meta)) throw new Error('A atualização em segundo plano já está em andamento.');
+    if (naTelaAgora_(meta)) throw new Error('Há uma atualização em andamento na tela. Aguarde terminar antes de usar o segundo plano.');
+    removerGatilhos_();
+    const base = retomavel_(meta) ? meta : novoMeta_('bg');       // retoma o progresso do dia, se houver
+    base.origem = 'bg';
+    base.ultimaEtapaEm = new Date().toISOString();
+    base.bg = { ativo: true, iniciadoEm: agoraTxt_(), tentativas: 0, erro: '', resultado: null, fimEm: '' };
+    gravarMeta_(base);
+    agendarPasso_(1000);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function indiceSegundoPlanoIniciar() {
+  if (CONFIG.MODO_TESTE) throw new Error('O MODO_TESTE está ligado: não há o que atualizar no Amber. Desligue o MODO_TESTE no Code.gs.');
+  iniciarSegundoPlano_();
+  return indiceStatus();
+}
+
+function indiceSegundoPlanoCancelar() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('O sistema está ocupado. Tente novamente em alguns segundos.');
+  try {
+    removerGatilhos_();
+    const meta = lerMeta_();
+    if (meta && meta.bg && meta.bg.ativo) {
+      meta.bg.ativo = false; meta.bg.erro = 'Cancelada manualmente.'; meta.bg.fimEm = agoraTxt_();
+      gravarMeta_(meta);
+    }
+    return indiceStatus();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+/** Chamada pelo gatilho. Um passo = uma etapa do índice; ao concluir, preenche os itens. */
+function indiceSegundoPlanoPasso() {
+  removerGatilhos_();                         // gatilhos de uso único: limpa o que acabou de disparar
+  let meta = lerMeta_();
+  if (!meta || !meta.bg || !meta.bg.ativo) return;
+  try {
+    const st = indiceEtapa();
+    meta = lerMeta_();
+    if (!meta.bg || !meta.bg.ativo) return;   // cancelada durante o passo
+    if (st.emAndamento) {
+      meta.bg.tentativas = 0; gravarMeta_(meta);
+      agendarPasso_(1000);
+      return;
+    }
+    const r = indicePreencher();
+    meta = lerMeta_();
+    meta.bg.ativo = false; meta.bg.fimEm = agoraTxt_();
+    meta.bg.resultado = {
+      preenchidos: r.preenchidos, totalItens: r.totalItens, novosProdutos: r.novosProdutos,
+      naoEncontrados: r.naoEncontrados, naoConfirmados: r.naoConfirmados
+    };
+    gravarMeta_(meta);
+  } catch (e) {
+    meta = lerMeta_();
+    if (!meta || !meta.bg || !meta.bg.ativo) return;
+    meta.bg.tentativas = (meta.bg.tentativas || 0) + 1;
+    if (meta.bg.tentativas >= 3) {
+      meta.bg.ativo = false; meta.bg.fimEm = agoraTxt_();
+      meta.bg.erro = String(e && e.message || e).slice(0, 300);
+      gravarMeta_(meta);
+      return;
+    }
+    meta.ultimaEtapaEm = new Date().toISOString();
+    gravarMeta_(meta);
+    agendarPasso_(120000);                    // tenta de novo em 2 minutos
   }
 }
 
@@ -486,6 +609,8 @@ function indiceEtapa() {
         meta.concluidoEm = agoraTxt_();
         meta.confirmadoAte = meta.estavel ? 1e12 : meta.m0;     // estável: todos os lotes lidos valem; senão só os <= m0
       }
+      const atual = lerMeta_();
+      if (atual && atual.bg) meta.bg = atual.bg;          // não desfaz um cancelamento feito durante a etapa
       gravarMeta_(meta);
       SpreadsheetApp.flush();
     }

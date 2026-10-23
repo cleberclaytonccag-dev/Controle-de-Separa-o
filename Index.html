@@ -106,10 +106,14 @@
     <div class="card" id="cardIndice">
       <h2>Itens dos lotes (Amber)</h2>
       <div class="hint" id="indiceTxt" style="margin:-6px 0 10px">Carregando…</div>
-      <button class="btn" id="btnIndice" type="button">Atualizar itens do dia</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn" id="btnIndice" type="button">Atualizar itens do dia</button>
+        <button class="btn sec" id="btnSegundoPlano" type="button">Atualizar em segundo plano</button>
+        <button class="btn sec" id="btnCancelarBg" type="button" hidden>Cancelar</button>
+      </div>
       <div class="progress" id="indiceBar" hidden><i></i></div>
       <div id="msgIndice"></div>
-      <div class="hint" style="margin-top:10px">Os lançamentos ficam aguardando os itens. Faça esta atualização <b>uma vez ao dia</b> (fim da tarde), depois de gerar todos os lotes. Leva alguns minutos; deixe a página aberta.</div>
+      <div class="hint" style="margin-top:10px">Os lançamentos ficam aguardando os itens. Faça esta atualização <b>uma vez ao dia</b> (fim da tarde), depois de gerar todos os lotes.<br><b>Na tela:</b> leva alguns minutos e a página precisa ficar aberta.<br><b>Em segundo plano:</b> pode fechar a página; o resultado aparece aqui quando você voltar.</div>
     </div>
     <div class="card">
       <h2>Lançamentos</h2>
@@ -234,19 +238,76 @@ $('tbUltimos').addEventListener('click', async (ev) => {
 });
 
 // ---------- itens dos lotes (índice do Amber) ----------
+let emTela = false, poll = null;
+
+function resumoResultado(r) {
+  let h = `✅ ${r.preenchidos} lançamento(s) preenchido(s) com ${nf(r.totalItens, 0)} itens.`;
+  if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) — classifique a dificuldade na aba Produtos.`;
+  let tipo = 'ok';
+  if (r.naoEncontrados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) não encontrado(s) no Amber: <b>${r.naoEncontrados.map(esc).join(', ')}</b>. Confira o número digitado (ou se o lote é mais antigo que 30 dias). Exclua o lançamento (🗑 na lista abaixo) e lance de novo com o número certo.`; }
+  if (r.naoConfirmados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) gerado(s) durante a leitura: <b>${r.naoConfirmados.map(esc).join(', ')}</b>. Atualize os itens de novo.`; }
+  return { tipo, html: h };
+}
+
 function mostrarIndice(s) {
   if (!s) return;
   if (s.semAba) { $('indiceTxt').textContent = 'Aba Indice_Amber não existe: rode a função setup() no editor do Apps Script.'; return; }
+  const bg = s.segundoPlano;
+  const rodandoBg = !!(bg && bg.ativo && !bg.travado);
   const aguard = s.aguardando ? `⏳ ${s.aguardando} lançamento(s) aguardando os itens. ` : 'Nenhum lançamento aguardando itens. ';
   let quando = 'Ainda não houve atualização.';
   if (s.existe && s.emAndamento) quando = `Atualização incompleta (${s.feitos} de ${s.total} etapas): clique para continuar.`;
   else if (s.existe) quando = `Última atualização: ${s.concluidoEm.slice(8, 10)}/${s.concluidoEm.slice(5, 7)} às ${s.concluidoEm.slice(11)}.`;
-  $('indiceTxt').textContent = aguard + quando;
+
+  if (rodandoBg) {
+    $('indiceTxt').textContent = `🔄 Rodando em segundo plano (etapa ${s.feitos} de ${s.total}). Você pode fechar a página.`;
+    $('indiceBar').hidden = false; $('indiceBar').firstElementChild.style.width = Math.round(95 * s.feitos / Math.max(s.total, 1)) + '%';
+  } else if (!emTela) {
+    $('indiceTxt').textContent = aguard + quando;
+    $('indiceBar').hidden = true;
+  }
+  $('btnIndice').disabled = emTela || rodandoBg;
+  $('btnSegundoPlano').disabled = emTela || rodandoBg;
+  $('btnCancelarBg').hidden = !(bg && bg.ativo);
+  $('btnCancelarBg').textContent = bg && bg.travado ? 'Cancelar (parece travada)' : 'Cancelar';
+
+  if (!emTela) {
+    if (bg && bg.travado) msg('msgIndice', 'warn', '⚠️ A atualização em segundo plano parece travada (sem atividade há mais de 15 minutos). Cancele e inicie de novo: o progresso já lido é mantido.');
+    else if (bg && !bg.ativo && bg.erro && /^Cancelada/.test(bg.erro)) msg('msgIndice', 'warn', `Atualização em segundo plano cancelada (${esc(bg.fimEm)}). O progresso já lido é mantido.`);
+    else if (bg && !bg.ativo && bg.erro) msg('msgIndice', 'err', `❌ Última atualização em segundo plano (${esc(bg.fimEm)}): ${esc(bg.erro)}`);
+    else if (bg && !bg.ativo && bg.resultado) { const r = resumoResultado(bg.resultado); msg('msgIndice', r.tipo, `Última atualização em segundo plano (${esc(bg.fimEm)}):<br>${r.html}`); }
+  }
+  if (rodandoBg && !poll) poll = setInterval(acompanharSegundoPlano, 8000);
+  if (!rodandoBg && poll) { clearInterval(poll); poll = null; }
 }
+
+async function acompanharSegundoPlano() {
+  try {
+    const s = await run('indiceStatus');
+    const eraAtivo = !$('btnCancelarBg').hidden;
+    mostrarIndice(s);
+    if (eraAtivo && !(s.segundoPlano && s.segundoPlano.ativo)) {       // terminou enquanto a página estava aberta
+      const d = await run('getInitData'); setPendentes(d.pendentes); carregarLancamentos();
+    }
+  } catch (e) { /* tenta de novo no próximo ciclo */ }
+}
+
+$('btnSegundoPlano').addEventListener('click', async () => {
+  msg('msgIndice', '', ''); $('btnSegundoPlano').disabled = true;
+  try { mostrarIndice(await run('indiceSegundoPlanoIniciar')); }
+  catch (e) { msg('msgIndice', 'err', '❌ ' + esc(erroTxt(e))); $('btnSegundoPlano').disabled = false; }
+});
+
+$('btnCancelarBg').addEventListener('click', async () => {
+  $('btnCancelarBg').disabled = true;
+  try { mostrarIndice(await run('indiceSegundoPlanoCancelar')); }
+  catch (e) { msg('msgIndice', 'err', '❌ ' + esc(erroTxt(e))); }
+  $('btnCancelarBg').disabled = false;
+});
 
 $('btnIndice').addEventListener('click', async () => {
   const btn = $('btnIndice'), bar = $('indiceBar');
-  btn.disabled = true; msg('msgIndice', '', ''); bar.hidden = false;
+  emTela = true; btn.disabled = true; $('btnSegundoPlano').disabled = true; msg('msgIndice', '', ''); bar.hidden = false;
   const fill = (pct) => { bar.firstElementChild.style.width = pct + '%'; };
   try {
     fill(2);
@@ -258,19 +319,15 @@ $('btnIndice').addEventListener('click', async () => {
     }
     fill(96); $('indiceTxt').textContent = 'Gravando os itens nos lançamentos…';
     const r = await run('indicePreencher');
-    fill(100); mostrarIndice(r.indice); setPendentes(r.pendentes);
-    let h = `✅ ${r.preenchidos} lançamento(s) preenchido(s) com ${nf(r.totalItens, 0)} itens.`;
-    if (r.novosProdutos) h += `<br>🆕 ${r.novosProdutos} produto(s) novo(s) — classifique a dificuldade na aba Produtos.`;
-    let tipo = 'ok';
-    if (r.naoEncontrados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) não encontrado(s) no Amber: <b>${r.naoEncontrados.map(esc).join(', ')}</b>. Confira o número digitado (ou se o lote é mais antigo que 30 dias). Exclua o lançamento (🗑 na lista abaixo) e lance de novo com o número certo.`; }
-    if (r.naoConfirmados.length) { tipo = 'warn'; h += `<br>⚠️ Lote(s) gerado(s) durante a leitura: <b>${r.naoConfirmados.map(esc).join(', ')}</b>. Clique em "Atualizar itens do dia" de novo.`; }
-    msg('msgIndice', tipo, h);
+    fill(100); emTela = false; mostrarIndice(r.indice); setPendentes(r.pendentes);
+    const x = resumoResultado(r); msg('msgIndice', x.tipo, x.html);
     carregarLancamentos();
   } catch (e) {
+    emTela = false;
     msg('msgIndice', 'err', '❌ ' + esc(erroTxt(e)) + '<br>Clique em "Atualizar itens do dia" para continuar de onde parou.');
     run('getInitData').then((d) => mostrarIndice(d.indice)).catch(() => {});
   } finally {
-    btn.disabled = false; setTimeout(() => { bar.hidden = true; }, 1500);
+    emTela = false; btn.disabled = false; $('btnSegundoPlano').disabled = false; setTimeout(() => { if (!poll) bar.hidden = true; }, 1500);
   }
 });
 
